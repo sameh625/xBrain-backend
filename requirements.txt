@@ -1,0 +1,26 @@
+# Explaino Backend - Python Dependencies
+# Django REST Framework with JWT Authentication
+
+# Core Django
+Django==5.2.5
+
+# Django REST Framework
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.4.0
+
+# CORS Headers for Mobile App
+django-cors-headers==4.6.0
+
+# PostgreSQL Database Adapter
+psycopg2-binary==2.9.10
+
+# Environment Variables & Security
+python-decouple==3.8  # For environment variables (.env file)
+django-ratelimit==4.1.0  # For rate limiting login attempts
+
+# Image Handling
+Pillow==11.0.0  # For ImageField
+
+# Additional Utilities
+django-filter==24.3  # For advanced filtering
+

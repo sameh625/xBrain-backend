@@ -1,7 +1,3 @@
-"""
-Serializers for Authentication and User Management
-"""
-
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password as django_validate_password
@@ -11,10 +7,6 @@ from .utils import validate_password_strength, send_otp_and_store, verify_otp
 
 
 class UserRegistrationSerializer(serializers.Serializer):
-    """
-    Serializer for user registration (Step 1: Send OTP)
-    Does NOT create user yet - just validates and sends OTP
-    """
     email = serializers.EmailField(required=True)
     username = serializers.CharField(required=True, min_length=8, max_length=16)
     password = serializers.CharField(required=True, write_only=True, min_length=8)
@@ -25,28 +17,22 @@ class UserRegistrationSerializer(serializers.Serializer):
     profile_image = serializers.ImageField(required=False, allow_null=True)
     
     def validate_email(self, value):
-        """Check if email already exists"""
-        # Check in pending registrations (cache)
         from django.core.cache import cache
         if cache.get(f'pending_registration_{value}'):
             raise serializers.ValidationError("An OTP has already been sent to this email. Please verify or wait before requesting another.")
         
-        # Check in actual users
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError("This email is already registered.")
         
         return value.lower()
     
     def validate_username(self, value):
-        """Check if username already exists and validate format"""
         if User.objects.filter(username__iexact=value).exists():
             raise serializers.ValidationError("This username is already taken.")
         
-        # Username must start with letter
         if not value[0].isalpha():
             raise serializers.ValidationError("Username must start with a letter.")
         
-        # Username can only contain alphanumeric and ._-
         import re
         if not re.match(r'^[a-zA-Z][a-zA-Z0-9._-]*$', value):
             raise serializers.ValidationError("Username can only contain letters, numbers, dots, underscores, and hyphens.")
@@ -54,14 +40,12 @@ class UserRegistrationSerializer(serializers.Serializer):
         return value.lower()
     
     def validate_password(self, value):
-        """Validate password strength"""
         is_valid, error_message = validate_password_strength(value)
         if not is_valid:
             raise serializers.ValidationError(error_message)
         return value
     
     def validate_phone_number(self, value):
-        """Validate phone number format and uniqueness"""
         import re
         if not re.match(r'^\+?[1-9]\d{7,14}$', value):
             raise serializers.ValidationError(
@@ -74,19 +58,13 @@ class UserRegistrationSerializer(serializers.Serializer):
         return value
     
     def create(self, validated_data):
-        """
-        Store registration data in cache and send OTP
-        User is NOT created yet
-        """
         email = validated_data['email']
         first_name = validated_data['first_name']
         
-        # Store registration data in cache (valid for 10 minutes)
         from django.core.cache import cache
         cache_key = f'pending_registration_{email}'
-        cache.set(cache_key, validated_data, timeout=600)  # 10 minutes
+        cache.set(cache_key, validated_data, timeout=600)
         
-        # Send OTP
         success, otp, error_message = send_otp_and_store(email, first_name)
         if not success:
             raise serializers.ValidationError({"otp": error_message})
@@ -98,22 +76,16 @@ class UserRegistrationSerializer(serializers.Serializer):
 
 
 class VerifyOTPSerializer(serializers.Serializer):
-    """
-    Serializer for OTP verification (Step 2: Verify OTP and create user)
-    """
     email = serializers.EmailField(required=True)
     otp = serializers.CharField(required=True, min_length=6, max_length=6)
     
     def validate(self, data):
-        """Verify OTP and create user if valid"""
         email = data['email']
         otp = data['otp']
         
-        # Verify OTP
         if not verify_otp(email, otp):
             raise serializers.ValidationError({"otp": "Invalid or expired OTP code."})
         
-        # Get pending registration data from cache
         from django.core.cache import cache
         cache_key = f'pending_registration_{email}'
         registration_data = cache.get(cache_key)
@@ -121,7 +93,6 @@ class VerifyOTPSerializer(serializers.Serializer):
         if not registration_data:
             raise serializers.ValidationError({"email": "Registration data not found. Please register again."})
         
-        # Create user
         try:
             user = User.objects.create_user(
                 email=registration_data['email'],
@@ -133,19 +104,15 @@ class VerifyOTPSerializer(serializers.Serializer):
                 bio=registration_data.get('bio', ''),
             )
             
-            # Handle profile image if provided
             if 'profile_image' in registration_data and registration_data['profile_image']:
                 user.profile_image = registration_data['profile_image']
                 user.save()
             
-            # Delete pending registration from cache
             cache.delete(cache_key)
             
-            # Delete OTP resend counters
             cache.delete(f'otp_resend_count_{email}')
             cache.delete(f'otp_last_sent_{email}')
             
-            # Send welcome email
             from .utils import send_welcome_email
             send_welcome_email(
                 email=user.email,
@@ -162,19 +129,13 @@ class VerifyOTPSerializer(serializers.Serializer):
 
 
 class UserLoginSerializer(serializers.Serializer):
-    """
-    Serializer for user login
-    Supports login with email or username
-    """
     identifier = serializers.CharField(required=True, help_text="Email or Username")
     password = serializers.CharField(required=True, write_only=True)
     
     def validate(self, data):
-        """Validate credentials and authenticate user"""
         identifier = data['identifier'].lower()
         password = data['password']
         
-        # Check if account is locked
         from .utils import is_account_locked, increment_login_attempts, reset_login_attempts
         is_locked, attempts, max_attempts = is_account_locked(identifier)
         
@@ -183,29 +144,23 @@ class UserLoginSerializer(serializers.Serializer):
                 "error": f"Account locked due to too many failed login attempts. Please try again after 15 minutes."
             })
         
-        # Try to find user by email or username
         user = None
         if '@' in identifier:
-            # Login with email
             try:
                 user = User.objects.get(email=identifier)
             except User.DoesNotExist:
                 pass
         else:
-            # Login with username
             try:
                 user = User.objects.get(username=identifier)
             except User.DoesNotExist:
                 pass
         
-        # Check if user exists and password is correct
         if user and user.check_password(password):
-            # Reset failed login attempts on successful login
             reset_login_attempts(identifier)
             data['user'] = user
             return data
         else:
-            # Increment failed attempts
             new_attempts = increment_login_attempts(identifier)
             remaining = max_attempts - new_attempts
             
@@ -220,7 +175,6 @@ class UserLoginSerializer(serializers.Serializer):
 
 
 class SpecializationSerializer(serializers.ModelSerializer):
-    """Serializer for Specialization model"""
     class Meta:
         model = Specialization
         fields = ['id', 'name', 'description']
@@ -228,7 +182,6 @@ class SpecializationSerializer(serializers.ModelSerializer):
 
 
 class CertificateSerializer(serializers.ModelSerializer):
-    """Serializer for Certificate model"""
     class Meta:
         model = Certificate
         fields = ['id', 'title', 'issuer', 'issue_date', 'certificate_url']
@@ -236,7 +189,6 @@ class CertificateSerializer(serializers.ModelSerializer):
 
 
 class PointsWalletSerializer(serializers.ModelSerializer):
-    """Serializer for PointsWallet model"""
     class Meta:
         model = PointsWallet
         fields = ['id', 'balance']
@@ -244,14 +196,11 @@ class PointsWalletSerializer(serializers.ModelSerializer):
 
 
 class UserDetailSerializer(serializers.ModelSerializer):
-    """
-    Detailed user serializer for login response
-    Includes specializations, wallet, and profile info
-    """
     specializations = SpecializationSerializer(many=True, read_only=True)
     wallet = PointsWalletSerializer(read_only=True)
     profile_image_url = serializers.SerializerMethodField()
-    
+    specialization_form_completed_at = serializers.DateTimeField(read_only=True)
+
     class Meta:
         model = User
         fields = [
@@ -264,14 +213,14 @@ class UserDetailSerializer(serializers.ModelSerializer):
             'bio',
             'profile_image_url',
             'specializations',
+            'specialization_form_completed_at',
             'wallet',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'email', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'email', 'created_at', 'updated_at', 'specialization_form_completed_at']
     
     def get_profile_image_url(self, obj):
-        """Get absolute URL for profile image"""
         if obj.profile_image:
             request = self.context.get('request')
             if request:
@@ -281,38 +230,71 @@ class UserDetailSerializer(serializers.ModelSerializer):
 
 
 class ResendOTPSerializer(serializers.Serializer):
-    """Serializer for resending OTP"""
     email = serializers.EmailField(required=True)
-    
+
     def validate_email(self, value):
-        """Check if there's a pending registration for this email"""
         from django.core.cache import cache
         cache_key = f'pending_registration_{value}'
         registration_data = cache.get(cache_key)
-        
+
         if not registration_data:
             raise serializers.ValidationError(
                 "No pending registration found for this email. Please register first."
             )
-        
+
         return value
-    
+
     def create(self, validated_data):
-        """Resend OTP to email"""
         email = validated_data['email']
-        
-        # Get registration data for first name
+
         from django.core.cache import cache
         cache_key = f'pending_registration_{email}'
         registration_data = cache.get(cache_key)
         first_name = registration_data.get('first_name')
-        
-        # Send OTP
+
         success, otp, error_message = send_otp_and_store(email, first_name)
         if not success:
             raise serializers.ValidationError({"error": error_message})
-        
+
         return {
             'email': email,
             'message': 'OTP resent successfully. Please check your email.'
         }
+
+
+class UserSpecializationSerializer(serializers.Serializer):
+    specialization_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=True,
+        required=False,
+        help_text="List of specialization UUIDs to assign to user"
+    )
+    skip = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Set to true to skip the specialization form"
+    )
+
+    def validate_specialization_ids(self, value):
+        if not value:
+            return value
+
+        existing_ids = set(Specialization.objects.filter(
+            id__in=value
+        ).values_list('id', flat=True))
+
+        invalid_ids = set(str(vid) for vid in value) - set(str(eid) for eid in existing_ids)
+
+        if invalid_ids:
+            raise serializers.ValidationError(
+                f"Invalid specialization IDs: {', '.join(invalid_ids)}"
+            )
+
+        return value
+
+    def validate(self, data):
+        if 'specialization_ids' not in data and not data.get('skip'):
+            raise serializers.ValidationError(
+                "Either 'specialization_ids' or 'skip' must be provided."
+            )
+        return data

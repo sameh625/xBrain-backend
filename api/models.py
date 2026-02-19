@@ -161,7 +161,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         default=False,
         help_text="Designates that this user has all permissions"
     )
-    
+
+    specialization_form_completed_at = models.DateTimeField(
+        _('specialization form completed at'),
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the user completed or skipped the specialization form (null = not yet shown)"
+    )
+
     objects = CustomUserManager()
     
     USERNAME_FIELD = 'email'

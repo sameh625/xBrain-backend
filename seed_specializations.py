@@ -1,14 +1,6 @@
-"""
-Seed Initial Specializations for Explaino Platform
-
-Run this script after migrations:
-    python seed_specializations.py
-"""
-
 import os
 import django
 
-# Setup Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'xBrain.settings')
 django.setup()
 
@@ -16,10 +8,6 @@ from api.models import Specialization
 
 
 def seed_specializations():
-    """
-    Create predefined specializations based on tech industry standards
-    """
-    
     specializations_data = [
         {
             "name": "Back-end development",
@@ -63,7 +51,7 @@ def seed_specializations():
         },
     ]
     
-    print("🌱 Seeding specializations...\n")
+    print("Seeding specializations...\n")
     
     created_count = 0
     existing_count = 0
@@ -75,19 +63,19 @@ def seed_specializations():
         )
         
         if created:
-            print(f"✅ Created: {spec.name}")
+            print(f"Created: {spec.name}")
             created_count += 1
         else:
-            print(f"⏭️  Already exists: {spec.name}")
+            print(f"Already exists: {spec.name}")
             existing_count += 1
     
     print(f"\n{'='*60}")
-    print(f"📊 Summary:")
-    print(f"   • Created: {created_count} specializations")
-    print(f"   • Already existed: {existing_count} specializations")
-    print(f"   • Total in database: {Specialization.objects.count()} specializations")
+    print(f"Summary:")
+    print(f"Created: {created_count} specializations")
+    print(f"Already existed: {existing_count} specializations")
+    print(f"Total in database: {Specialization.objects.count()} specializations")
     print(f"{'='*60}\n")
-    print("✨ Specializations seeding complete!")
+    print("Specializations seeding complete!")
 
 
 if __name__ == "__main__":

@@ -6,8 +6,4 @@ class ApiConfig(AppConfig):
     name = "api"
     
     def ready(self):
-        """
-        Import signals when the app is ready
-        This enables automatic PointsWallet creation for new users
-        """
         import api.signals

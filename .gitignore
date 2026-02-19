@@ -51,3 +51,4 @@ Thumbs.db
 # Project specific
 *.pyc
 migrations/__pycache__/
+*.md

@@ -1,7 +1,3 @@
-"""
-Views for Authentication and User Management
-"""
-
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -15,17 +11,13 @@ from .serializers import (
     UserLoginSerializer,
     ResendOTPSerializer,
     UserDetailSerializer,
+    SpecializationSerializer,
+    UserSpecializationSerializer,
 )
-from .models import User
+from .models import User, Specialization, UserSpecialization
 
 
 class RegisterView(APIView):
-    """
-    POST: Register new user (Step 1: Send OTP)
-    
-    Validates registration data and sends OTP to email.
-    User account is NOT created yet.
-    """
     permission_classes = [AllowAny]
     
     def post(self, request):
@@ -45,29 +37,18 @@ class RegisterView(APIView):
 
 
 class VerifyEmailView(APIView):
-    """
-    POST: Verify OTP and create user account (Step 2: Complete Registration)
-    
-    If OTP is valid:
-    - Creates user account
-    - Auto-login (returns JWT tokens)
-    - Returns user profile with wallet and specializations
-    """
     permission_classes = [AllowAny]
     
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
         
         if serializer.is_valid():
-            # User was created in serializer validation
             user = serializer.validated_data['user']
             
-            # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
             access_token = str(refresh.access_token)
             refresh_token = str(refresh)
             
-            # Get user details
             user_serializer = UserDetailSerializer(user, context={'request': request})
             
             return Response(
@@ -84,14 +65,6 @@ class VerifyEmailView(APIView):
 
 
 class LoginView(APIView):
-    """
-    POST: User login
-    
-    Login with email or username.
-    Includes rate limiting (5 attempts, 15 min lockout).
-    Blocks unverified emails.
-    Returns JWT tokens and user profile with wallet balance.
-    """
     permission_classes = [AllowAny]
     
     def post(self, request):
@@ -100,12 +73,10 @@ class LoginView(APIView):
         if serializer.is_valid():
             user = serializer.validated_data['user']
             
-            # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
             access_token = str(refresh.access_token)
             refresh_token = str(refresh)
             
-            # Get user details with wallet and specializations
             user_serializer = UserDetailSerializer(user, context={'request': request})
             
             return Response(
@@ -122,12 +93,6 @@ class LoginView(APIView):
 
 
 class ResendOTPView(APIView):
-    """
-    POST: Resend OTP to email
-    
-    Rate limited: 60 seconds between requests
-    Maximum 3 resend attempts
-    """
     permission_classes = [AllowAny]
     
     def post(self, request):
@@ -147,21 +112,114 @@ class ResendOTPView(APIView):
 
 
 class UserProfileView(APIView):
-    """
-    GET: Get current user's profile
-    PATCH: Update current user's profile
-    """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
-        """Get current user's profile"""
         serializer = UserDetailSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
     def patch(self, request):
-        """Update current user's profile"""
-        # TODO: Implement profile update logic
         return Response(
             {"message": "Profile update not yet implemented"},
             status=status.HTTP_501_NOT_IMPLEMENTED
+        )
+
+
+class SpecializationListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        specializations = Specialization.objects.all()
+        serializer = SpecializationSerializer(specializations, many=True)
+
+        if not specializations.exists():
+            return Response(
+                {
+                    "message": "No specializations are currently available in the system.",
+                    "results": []
+                },
+                status=status.HTTP_200_OK
+            )
+
+        return Response(
+            {
+                "count": specializations.count(),
+                "results": serializer.data
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+class UserSpecializationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        specializations = user.specializations.all()
+        specialization_data = SpecializationSerializer(specializations, many=True).data
+
+        return Response(
+            {
+                "specialization_form_completed_at": user.specialization_form_completed_at,
+                "specializations": specialization_data
+            },
+            status=status.HTTP_200_OK
+        )
+
+    def put(self, request):
+        serializer = UserSpecializationSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        specialization_ids = serializer.validated_data.get('specialization_ids', [])
+
+        UserSpecialization.objects.filter(user=user).delete()
+
+        for spec_id in specialization_ids:
+            UserSpecialization.objects.create(
+                user=user,
+                specialization_id=spec_id
+            )
+
+        from django.utils import timezone
+        user.specialization_form_completed_at = timezone.now()
+        user.save(update_fields=['specialization_form_completed_at'])
+
+        specializations = user.specializations.all()
+        specialization_data = SpecializationSerializer(specializations, many=True).data
+
+        return Response(
+            {
+                "specialization_form_completed_at": user.specialization_form_completed_at,
+                "specializations": specialization_data
+            },
+            status=status.HTTP_200_OK
+        )
+
+    def patch(self, request):
+        serializer = UserSpecializationSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+
+        if not serializer.validated_data.get('skip'):
+            return Response(
+                {"error": "Set 'skip' to true to skip the specialization form."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from django.utils import timezone
+        user.specialization_form_completed_at = timezone.now()
+        user.save(update_fields=['specialization_form_completed_at'])
+
+        return Response(
+            {
+                "specialization_form_completed_at": user.specialization_form_completed_at,
+                "specializations": []
+            },
+            status=status.HTTP_200_OK
         )

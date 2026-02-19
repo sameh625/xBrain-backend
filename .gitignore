@@ -52,3 +52,6 @@ Thumbs.db
 *.pyc
 migrations/__pycache__/
 *.md
+
+# Documentation
+*.md

@@ -51,7 +51,9 @@ Thumbs.db
 # Project specific
 *.pyc
 migrations/__pycache__/
-*.md
 
 # Documentation
 *.md
+
+# Secrets
+PRODUCTION_ENV_VARS_TO_COPY.txt

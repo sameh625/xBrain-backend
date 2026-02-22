@@ -25,12 +25,13 @@ class RegisterView(APIView):
         
         if serializer.is_valid():
             result = serializer.save()
-            response_data = {
-                "message": "OTP sent successfully. Please check your email for verification code.",
-                "email": result['email'],
-                "otp": result.get('otp'),  # Included for testing (remove in production)
-            }
-            return Response(response_data, status=status.HTTP_200_OK)
+            return Response(
+                {
+                    "message": "OTP sent successfully. Please check your email for verification code.",
+                    "email": result['email']
+                },
+                status=status.HTTP_200_OK
+            )
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -172,7 +173,7 @@ class UserSpecializationView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
-        specialization_ids = serializer.validated_data.get('specialization_ids', [])
+        specialization_ids = list(set(serializer.validated_data.get('specialization_ids', [])))
 
         UserSpecialization.objects.filter(user=user).delete()
 

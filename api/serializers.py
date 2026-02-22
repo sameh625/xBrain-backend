@@ -71,7 +71,6 @@ class UserRegistrationSerializer(serializers.Serializer):
         
         return {
             'email': email,
-            'otp': otp,
             'message': 'OTP sent successfully. Please check your email.'
         }
 

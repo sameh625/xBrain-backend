@@ -1,6 +1,6 @@
 # xBrain API Documentation
 
-**Base URL:** `https://xbrain-backend.onrender.com`
+**Base URL:** _will be shared once deployment is finalized_
 
 All requests use `Content-Type: application/json`.
 
@@ -24,7 +24,7 @@ Protected endpoints need the header: `Authorization: Bearer <access_token>`
 | `profile_image_url` | `string? (URL)` | nullable |
 | `specializations` | `Specialization[]` | array of specialization objects |
 | `wallet` | `Wallet` | auto-created on registration |
-| `specialization_form_completed_at` | `string? (ISO 8601)` | nullable, null means not yet shown |
+| `specialization_form_completed_at` | `string? (ISO 8601)` | nullable, null means form not yet shown |
 | `created_at` | `string (ISO 8601)` | auto-generated |
 | `updated_at` | `string (ISO 8601)` | auto-updated |
 
@@ -47,19 +47,21 @@ Protected endpoints need the header: `Authorization: Bearer <access_token>`
 
 ## Auth Endpoints
 
-### Register
+### 1. Register
 `POST /api/auth/register/`
+
+Sends an OTP to the user's email. No account is created yet.
 
 | Field | Type | Required | Validation |
 |-------|------|----------|------------|
 | `email` | `string` | yes | valid email, unique |
-| `username` | `string` | yes | 8-16 chars, starts with letter, unique |
-| `password` | `string` | yes | min 8, uppercase + lowercase + number + special char |
+| `username` | `string` | yes | 8-16 chars, starts with letter, letters/numbers/dots/underscores/hyphens only, unique |
+| `password` | `string` | yes | min 8 chars, must have uppercase + lowercase + number + special char |
 | `first_name` | `string` | yes | max 50 chars |
 | `last_name` | `string` | yes | max 50 chars |
-| `phone_number` | `string` | yes | 7-15 digits, optional + prefix, unique |
+| `phone_number` | `string` | yes | 7-15 digits, optional `+` prefix, unique |
 | `bio` | `string` | no | max 500 chars |
-| `profile_image` | `file` | no | image file upload |
+| `profile_image` | `file` | no | image upload |
 
 ```json
 {
@@ -69,8 +71,7 @@ Protected endpoints need the header: `Authorization: Bearer <access_token>`
   "first_name": "John",
   "last_name": "Doe",
   "phone_number": "+1234567890",
-  "bio": "optional bio text",
-  "profile_image": null
+  "bio": "optional bio text"
 }
 ```
 
@@ -78,22 +79,35 @@ Protected endpoints need the header: `Authorization: Bearer <access_token>`
 ```json
 {
   "message": "OTP sent successfully. Please check your email for verification code.",
-  "email": "user@example.com",
-  "otp": "583921"
+  "email": "user@example.com"
 }
 ```
 
-The `otp` field is included in the response directly. Use it in the next step.
+The OTP is sent to the user's email. Use it in the next step.
+
+**Possible errors (400):**
+
+| Scenario | Error key | Example message |
+|----------|-----------|-----------------|
+| Email taken | `email` | `"This email is already registered."` |
+| Email pending OTP | `email` | `"An OTP has already been sent to this email..."` |
+| Username taken | `username` | `"This username is already taken."` |
+| Username invalid | `username` | `"Username must start with a letter."` |
+| Weak password | `password` | `"Password must contain at least one uppercase letter"` |
+| Bad phone format | `phone_number` | `"Enter a valid phone number (7-15 digits, optional + prefix)."` |
+| Phone taken | `phone_number` | `"This phone number is already registered."` |
 
 ---
 
-### Verify Email
+### 2. Verify Email
 `POST /api/auth/verify-email/`
+
+Verifies the OTP and creates the user account. Returns tokens immediately (auto-login).
 
 | Field | Type | Required |
 |-------|------|----------|
 | `email` | `string` | yes |
-| `otp` | `string` | yes (exactly 6 digits) |
+| `otp` | `string` | yes, exactly 6 characters |
 
 ```json
 {
@@ -108,21 +122,45 @@ The `otp` field is included in the response directly. Use it in the next step.
   "message": "Email verified successfully. Welcome to xBrain!",
   "access_token": "eyJ0eXAi...",
   "refresh_token": "eyJ0eXAi...",
-  "user": { ... }
+  "user": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "user@example.com",
+    "username": "johndoe123",
+    "first_name": "John",
+    "last_name": "Doe",
+    "phone_number": "+1234567890",
+    "bio": "",
+    "profile_image_url": null,
+    "specializations": [],
+    "wallet": {
+      "id": "663e8500-f30c-52e5-b827-557766551111",
+      "balance": 0
+    },
+    "specialization_form_completed_at": null,
+    "created_at": "2026-02-22T12:00:00Z",
+    "updated_at": "2026-02-22T12:00:00Z"
+  }
 }
 ```
 
-The user is automatically logged in after verification — you get both tokens right away.
+**Possible errors (400):**
+
+| Scenario | Error key |
+|----------|-----------|
+| Wrong or expired OTP | `otp` |
+| Registration data expired (10 min timeout) | `email` |
 
 ---
 
-### Login
+### 3. Login
 `POST /api/auth/login/`
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `identifier` | `string` | yes | email or username |
-| `password` | `string` | yes | |
+Works with either email or username in the `identifier` field.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `identifier` | `string` | yes (email or username) |
+| `password` | `string` | yes |
 
 ```json
 {
@@ -141,29 +179,64 @@ The user is automatically logged in after verification — you get both tokens r
 }
 ```
 
-The `user` object is the same shape as described in the Data Types section above.
+The `user` object is the same shape as the verify response above.
 
-Failed login returns how many attempts are left. After 5 failures the account locks for 15 minutes.
+**Possible errors (400):**
+
+| Scenario | Example message |
+|----------|-----------------|
+| Wrong credentials | `"Invalid credentials. 4 attempts remaining before account lockout."` |
+| Account locked (5 fails) | `"Account locked due to too many failed login attempts. Please try again after 15 minutes."` |
 
 ---
 
-### Resend OTP
+### 4. Resend OTP
 `POST /api/auth/resend-otp/`
+
+Resends the OTP to the email. Only works if there's a pending registration.
 
 | Field | Type | Required |
 |-------|------|----------|
 | `email` | `string` | yes |
 
-There's a 60-second cooldown between resends, and a max of 3 resend attempts.
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response (200):**
+```json
+{
+  "message": "OTP resent successfully. Please check your email.",
+  "email": "user@example.com"
+}
+```
+
+**Limits:** 60-second cooldown between resends, max 3 resend attempts.
+
+**Possible errors (400):**
+
+| Scenario | Example message |
+|----------|-----------------|
+| No pending registration | `"No pending registration found for this email."` |
+| Too soon | `"Please wait 45 seconds before requesting a new code"` |
+| Max resends reached | `"Maximum OTP resend attempts reached."` |
 
 ---
 
-### Refresh Token
+### 5. Refresh Token
 `POST /api/auth/token/refresh/`
 
 | Field | Type | Required |
 |-------|------|----------|
 | `refresh` | `string` | yes |
+
+```json
+{
+  "refresh": "eyJ0eXAi..."
+}
+```
 
 **Response (200):**
 ```json
@@ -173,26 +246,26 @@ There's a 60-second cooldown between resends, and a max of 3 resend attempts.
 }
 ```
 
-Save both tokens — the old refresh token gets blacklisted after use. The refresh token itself is valid for 7 days.
+Save both — the old refresh token is blacklisted. Refresh token is valid for 7 days.
 
 ### How tokens work
 
-After login or verification, you get two tokens. The **access token** is what you send with every request to prove you're logged in — it expires after 1 hour. The **refresh token** is used only to get a new access token when the old one expires, so the user doesn't have to log in again. Store both securely (e.g. `flutter_secure_storage`). If a request returns 401, call `/api/auth/token/refresh/` to get fresh tokens. If the refresh token is also expired (after 7 days), the user needs to log in again.
+After login or verification you get two tokens. The **access token** goes in every request header to prove you're logged in — it expires after 1 hour. The **refresh token** is only used to get a new access token when the old one expires, so the user doesn't have to log in again. Store both with `flutter_secure_storage`. If a request returns 401, call `/api/auth/token/refresh/`. If the refresh token is also expired (7 days), redirect to login.
 
 ---
 
 ## Protected Endpoints
 
-These require the header: `Authorization: Bearer <access_token>`
+These require: `Authorization: Bearer <access_token>`
 
-### Get My Profile
+### 6. Get My Profile
 `GET /api/users/me/`
 
-Returns the current user's full profile (same shape as the User object above).
+Returns the current user's full profile (same shape as the user object in login/verify responses).
 
 ---
 
-### Get All Specializations
+### 7. Get All Specializations
 `GET /api/specializations/`
 
 **Response (200):**
@@ -209,12 +282,23 @@ Returns the current user's full profile (same shape as the User object above).
 }
 ```
 
+Returns `"message": "No specializations available"` with empty `results` if none exist.
+
 ---
 
-### Get/Set My Specializations
-`GET /api/users/me/specializations/` — returns current user's specializations
+### 8. My Specializations
 
-`PUT /api/users/me/specializations/` — set the user's specializations (replaces all)
+**GET** `/api/users/me/specializations/` — returns current specializations and form status
+
+**Response (200):**
+```json
+{
+  "specialization_form_completed_at": null,
+  "specializations": []
+}
+```
+
+**PUT** `/api/users/me/specializations/` — set specializations (replaces all existing ones)
 
 | Field | Type | Required |
 |-------|------|----------|
@@ -226,11 +310,11 @@ Returns the current user's full profile (same shape as the User object above).
 }
 ```
 
-`PATCH /api/users/me/specializations/` — skip the specialization form
+**PATCH** `/api/users/me/specializations/` — skip the specialization selection form
 
 | Field | Type | Required |
 |-------|------|----------|
-| `skip` | `boolean` | yes (must be true) |
+| `skip` | `boolean` | yes (must be `true`) |
 
 ```json
 {
@@ -238,11 +322,13 @@ Returns the current user's full profile (same shape as the User object above).
 }
 ```
 
+Both PUT and PATCH set `specialization_form_completed_at` to the current time.
+
 ---
 
 ## Error Format
 
-All errors come back as 400 with a JSON body. The key is the field name, the value is an array of strings:
+All validation errors come back as **400** with field-level messages:
 
 ```json
 {
@@ -251,7 +337,7 @@ All errors come back as 400 with a JSON body. The key is the field name, the val
 }
 ```
 
-For auth errors on protected endpoints you'll get 401:
+Auth errors on protected endpoints return **401**:
 
 ```json
 {
@@ -263,17 +349,15 @@ For auth errors on protected endpoints you'll get 401:
 
 ## Quick Reference
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/auth/register/` | No | Register + get OTP |
-| POST | `/api/auth/verify-email/` | No | Verify OTP + create account |
-| POST | `/api/auth/login/` | No | Login (email or username) |
-| POST | `/api/auth/resend-otp/` | No | Resend OTP |
-| POST | `/api/auth/token/refresh/` | No | Get new tokens |
-| GET | `/api/users/me/` | Yes | Get my profile |
-| GET | `/api/specializations/` | Yes | List all specializations |
-| GET | `/api/users/me/specializations/` | Yes | My specializations |
-| PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
-| PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
-
----
+| # | Method | Endpoint | Auth | Description |
+|---|--------|----------|------|-------------|
+| 1 | POST | `/api/auth/register/` | No | Send OTP to email |
+| 2 | POST | `/api/auth/verify-email/` | No | Verify OTP + create account |
+| 3 | POST | `/api/auth/login/` | No | Login (email or username) |
+| 4 | POST | `/api/auth/resend-otp/` | No | Resend OTP |
+| 5 | POST | `/api/auth/token/refresh/` | No | Refresh expired tokens |
+| 6 | GET | `/api/users/me/` | Yes | Get my profile |
+| 7 | GET | `/api/specializations/` | Yes | List all specializations |
+| 8 | GET | `/api/users/me/specializations/` | Yes | My specializations |
+| 8 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
+| 8 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |

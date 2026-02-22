@@ -54,6 +54,7 @@ migrations/__pycache__/
 
 # Documentation
 *.md
+.specify/
 
 # Secrets
 PRODUCTION_ENV_VARS_TO_COPY.txt

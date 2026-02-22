@@ -1,1 +1,1 @@
-web: gunicorn xBrain.wsgi --timeout 120 --workers 2
+web: gunicorn xBrain.wsgi --timeout 180 --workers 1

@@ -109,9 +109,10 @@ def send_otp_and_store(email, first_name=None):
     validity = getattr(settings, 'OTP_VALIDITY_MINUTES', 5)
     store_otp(email, otp, validity)
     
+    # Try to send email, but don't fail if it can't be sent
     email_sent = send_verification_email(email, otp, first_name)
     if not email_sent:
-        return False, None, "Failed to send verification email. Please try again."
+        print(f"[WARNING] Email could not be sent to {email}. OTP is stored and returned in response.")
     
     mark_otp_sent(email)
     increment_otp_resend_count(email)

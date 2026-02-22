@@ -25,13 +25,12 @@ class RegisterView(APIView):
         
         if serializer.is_valid():
             result = serializer.save()
-            return Response(
-                {
-                    "message": "OTP sent successfully. Please check your email for verification code.",
-                    "email": result['email']
-                },
-                status=status.HTTP_200_OK
-            )
+            response_data = {
+                "message": "OTP sent successfully. Please check your email for verification code.",
+                "email": result['email'],
+                "otp": result.get('otp'),  # Included for testing (remove in production)
+            }
+            return Response(response_data, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

@@ -5,44 +5,6 @@
 All requests use `Content-Type: application/json`.
 
 Protected endpoints need the header: `Authorization: Bearer <access_token>`
-
----
-
-## Data Types
-
-### User Object
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `id` | `string (UUID)` | auto-generated |
-| `email` | `string` | max 255 chars, unique |
-| `username` | `string` | 8-16 chars, unique, lowercase |
-| `first_name` | `string` | max 50 chars |
-| `last_name` | `string` | max 50 chars |
-| `phone_number` | `string` | 7-15 digits, optional `+` prefix, unique |
-| `bio` | `string` | max 500 chars, optional |
-| `profile_image_url` | `string? (URL)` | nullable |
-| `specializations` | `Specialization[]` | array of specialization objects |
-| `wallet` | `Wallet` | auto-created on registration |
-| `specialization_form_completed_at` | `string? (ISO 8601)` | nullable, null means form not yet shown |
-| `created_at` | `string (ISO 8601)` | auto-generated |
-| `updated_at` | `string (ISO 8601)` | auto-updated |
-
-### Wallet Object
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `id` | `string (UUID)` | auto-generated |
-| `balance` | `integer` | starts at 0, never negative |
-
-### Specialization Object
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `id` | `string (UUID)` | auto-generated |
-| `name` | `string` | max 100 chars, unique |
-| `description` | `string` | max 500 chars |
-
 ---
 
 ## Auth Endpoints
@@ -71,7 +33,8 @@ Sends an OTP to the user's email. No account is created yet.
   "first_name": "John",
   "last_name": "Doe",
   "phone_number": "+1234567890",
-  "bio": "optional bio text"
+  "bio": "optional bio text",
+  "profile_image": null
 }
 ```
 

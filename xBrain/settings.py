@@ -26,7 +26,7 @@ SECRET_KEY = config('SECRET_KEY', default="django-insecure-$1z*enm)vvuzvj-$8h5kx
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = ['*']  # Allow all hosts for easier deployment (Render will override)
+ALLOWED_HOSTS = ['*']  # Allow all hosts for deployment
 
 
 # Application definition

@@ -1,6 +1,6 @@
 # xBrain API Documentation
 
-**Base URL:** _will be shared once deployment is finalized_
+**Base URL:** `https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net`
 
 All requests use `Content-Type: application/json`.
 

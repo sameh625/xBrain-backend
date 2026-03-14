@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
 from django.contrib.auth import authenticate
 
 from .serializers import (
@@ -19,6 +19,14 @@ from .serializers import (
     ResetPasswordSerializer,
 )
 from .models import User, Specialization, UserSpecialization
+
+auth_param = OpenApiParameter(
+    name='Authorization',
+    description='Bearer token (e.g., Bearer <your_access_token>)',
+    required=True,
+    type=str,
+    location=OpenApiParameter.HEADER
+)
 
 
 class RegisterView(APIView):
@@ -157,6 +165,7 @@ class UserProfileView(APIView):
     @extend_schema(
         summary="Get current user profile",
         description="Returns the profile details of the authenticated user, including their specializations and wallet balance.",
+        parameters=[auth_param],
         responses={200: UserDetailSerializer}
     )
     def get(self, request):
@@ -177,6 +186,7 @@ class SpecializationListView(APIView):
     @extend_schema(
         summary="List all specializations",
         description="Returns a list of all available specializations in the system.",
+        parameters=[auth_param],
         responses={
             200: OpenApiResponse(description="List of specializations or an empty response if none exist")
         }
@@ -209,6 +219,7 @@ class UserSpecializationView(APIView):
     @extend_schema(
         summary="Get user's specializations",
         description="Returns the specializations currently selected by the authenticated user, along with the timestamp of when they completed the selection form.",
+        parameters=[auth_param],
         responses={200: OpenApiResponse(description="User's specializations and form completion status")}
     )
     def get(self, request):
@@ -227,6 +238,7 @@ class UserSpecializationView(APIView):
     @extend_schema(
         summary="Set user's specializations",
         description="Overwrites the user's current specializations with the provided list of specialization UUIDs. Also marks the specialization form as completed.",
+        parameters=[auth_param],
         request=UserSpecializationSerializer,
         responses={
             200: OpenApiResponse(description="Specializations updated successfully"),
@@ -268,6 +280,7 @@ class UserSpecializationView(APIView):
     @extend_schema(
         summary="Skip specialization selection",
         description="Allows the user to skip selecting specializations. Marks the specialization form as completed but assigns no specializations.",
+        parameters=[auth_param],
         request=UserSpecializationSerializer,
         responses={
             200: OpenApiResponse(description="Form skipped successfully"),

@@ -3,6 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
 
 from .serializers import (
@@ -23,6 +24,15 @@ from .models import User, Specialization, UserSpecialization
 class RegisterView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Register a new user",
+        description="Creates a pending registration and sends a 6-digit OTP to the provided email.",
+        request=UserRegistrationSerializer,
+        responses={
+            200: OpenApiResponse(description="OTP sent successfully"),
+            400: OpenApiResponse(description="Validation error (e.g., email taken, weak password)")
+        }
+    )
     def post(self, request):
         serializer = UserRegistrationSerializer(data=request.data)
         
@@ -42,6 +52,15 @@ class RegisterView(APIView):
 class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Verify email with OTP",
+        description="Verifies the 6-digit OTP sent to the user's email. On success, creates the user account and returns JWT tokens along with the user profile.",
+        request=VerifyOTPSerializer,
+        responses={
+            201: OpenApiResponse(description="Email verified successfully, returning JWT tokens and user profile"),
+            400: OpenApiResponse(description="Invalid or expired OTP")
+        }
+    )
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
         
@@ -70,6 +89,15 @@ class VerifyEmailView(APIView):
 class LoginView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Login user",
+        description="Authenticates a user via email or username and password. Returns JWT tokens and the user profile. Implements account lockout after 5 failed attempts.",
+        request=UserLoginSerializer,
+        responses={
+            200: OpenApiResponse(description="Login successful, returning JWT tokens and user profile"),
+            400: OpenApiResponse(description="Invalid credentials or account locked")
+        }
+    )
     def post(self, request):
         serializer = UserLoginSerializer(data=request.data)
         
@@ -98,6 +126,15 @@ class LoginView(APIView):
 class ResendOTPView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Resend registration OTP",
+        description="Resends the 6-digit OTP to the email of a pending registration. Subject to a 60-second cooldown and a maximum of 3 attempts.",
+        request=ResendOTPSerializer,
+        responses={
+            200: OpenApiResponse(description="OTP resent successfully"),
+            400: OpenApiResponse(description="No pending registration found, cooldown active, or max attempts reached")
+        }
+    )
     def post(self, request):
         serializer = ResendOTPSerializer(data=request.data)
         
@@ -117,10 +154,16 @@ class ResendOTPView(APIView):
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="Get current user profile",
+        description="Returns the profile details of the authenticated user, including their specializations and wallet balance.",
+        responses={200: UserDetailSerializer}
+    )
     def get(self, request):
         serializer = UserDetailSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(exclude=True)
     def patch(self, request):
         return Response(
             {"message": "Profile update not yet implemented"},

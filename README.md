@@ -63,5 +63,3 @@ This project is configured for seamless deployment to **Azure App Service (Linux
 * **Database:** Azure Database for PostgreSQL Flexible Server.
 * **Static Files:** Served via `whitenoise`.
 * **Server:** Gunicorn using `startup.sh`.
-
-See the internal [DEPLOYMENT_GUIDE](DEPLOYMENT_GUIDE.md) document for detailed infrastructure setup instructions.

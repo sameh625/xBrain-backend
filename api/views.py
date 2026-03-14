@@ -174,6 +174,13 @@ class UserProfileView(APIView):
 class SpecializationListView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="List all specializations",
+        description="Returns a list of all available specializations in the system.",
+        responses={
+            200: OpenApiResponse(description="List of specializations or an empty response if none exist")
+        }
+    )
     def get(self, request):
         specializations = Specialization.objects.all()
         serializer = SpecializationSerializer(specializations, many=True)
@@ -199,6 +206,11 @@ class SpecializationListView(APIView):
 class UserSpecializationView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="Get user's specializations",
+        description="Returns the specializations currently selected by the authenticated user, along with the timestamp of when they completed the selection form.",
+        responses={200: OpenApiResponse(description="User's specializations and form completion status")}
+    )
     def get(self, request):
         user = request.user
         specializations = user.specializations.all()
@@ -212,6 +224,15 @@ class UserSpecializationView(APIView):
             status=status.HTTP_200_OK
         )
 
+    @extend_schema(
+        summary="Set user's specializations",
+        description="Overwrites the user's current specializations with the provided list of specialization UUIDs. Also marks the specialization form as completed.",
+        request=UserSpecializationSerializer,
+        responses={
+            200: OpenApiResponse(description="Specializations updated successfully"),
+            400: OpenApiResponse(description="Invalid specialization IDs provided")
+        }
+    )
     def put(self, request):
         serializer = UserSpecializationSerializer(data=request.data)
 
@@ -244,6 +265,15 @@ class UserSpecializationView(APIView):
             status=status.HTTP_200_OK
         )
 
+    @extend_schema(
+        summary="Skip specialization selection",
+        description="Allows the user to skip selecting specializations. Marks the specialization form as completed but assigns no specializations.",
+        request=UserSpecializationSerializer,
+        responses={
+            200: OpenApiResponse(description="Form skipped successfully"),
+            400: OpenApiResponse(description="Missing 'skip' boolean in request")
+        }
+    )
     def patch(self, request):
         serializer = UserSpecializationSerializer(data=request.data)
 
@@ -274,6 +304,15 @@ class UserSpecializationView(APIView):
 class ForgotPasswordView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Send password reset OTP",
+        description="Generates a 6-digit OTP and sends it to the given user's email address.",
+        request=ForgotPasswordSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset code sent to your email"),
+            400: OpenApiResponse(description="User with this email not found")
+        }
+    )
     def post(self, request):
         serializer = ForgotPasswordSerializer(data=request.data)
         if serializer.is_valid():
@@ -285,6 +324,15 @@ class ForgotPasswordView(APIView):
 class VerifyResetOTPView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Verify password reset OTP",
+        description="Validates the OTP sent to the user's email. Returns a secure 15-minute `reset_token` that must be used in the final reset password step.",
+        request=VerifyResetOTPSerializer,
+        responses={
+            200: OpenApiResponse(description="OTP verified, returning `reset_token`"),
+            400: OpenApiResponse(description="Invalid or expired OTP code")
+        }
+    )
     def post(self, request):
         serializer = VerifyResetOTPSerializer(data=request.data)
         if serializer.is_valid():
@@ -295,6 +343,15 @@ class VerifyResetOTPView(APIView):
 class ResetPasswordView(APIView):
     permission_classes = [AllowAny]
     
+    @extend_schema(
+        summary="Reset password",
+        description="Sets a new password for the user, using the `reset_token` obtained from the OTP verification step.",
+        request=ResetPasswordSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset successfully"),
+            400: OpenApiResponse(description="Invalid token or weak password")
+        }
+    )
     def post(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
         if serializer.is_valid():

@@ -53,6 +53,7 @@ Thumbs.db
 migrations/__pycache__/
 
 # Documentation
+*.md
 .specify/
 
 # Secrets

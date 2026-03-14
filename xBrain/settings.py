@@ -88,7 +88,7 @@ WSGI_APPLICATION = "xBrain.wsgi.application"
 import dj_database_url
 
 # PostgreSQL Configuration
-# Render sets DATABASE_URL environment variable automatically
+# Azure App Service sets DATABASE_URL environment variable from the Application Settings
 DATABASES = {
     "default": dj_database_url.config(
         default=config('DATABASE_URL', default=f"postgres://{config('DB_USER', default='postgres')}:{config('DB_PASSWORD', default='postgres')}@{config('DB_HOST', default='localhost')}:{config('DB_PORT', default='5432')}/{config('DB_NAME', default='xbrain_db')}"),

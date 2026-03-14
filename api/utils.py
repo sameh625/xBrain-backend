@@ -209,3 +209,50 @@ def is_account_locked(identifier):
         return True, attempts, max_attempts
     
     return False, attempts, max_attempts
+
+
+def send_password_reset_email(email, otp, first_name=None):
+    subject = 'Password Reset Request - xBrain'
+    
+    greeting = f"Hi {first_name}," if first_name else "Hi,"
+    
+    message = f"""{greeting}
+
+We received a request to reset your password for your xBrain account.
+
+Your password reset code is: {otp}
+
+This code will expire in 10 minutes.
+
+If you didn't request a password reset, please ignore this email. Your password will remain unchanged.
+
+Best regards,
+The xBrain Team
+"""
+    
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Error sending password reset email: {e}")
+        return False
+
+
+def send_reset_otp_and_store(email, first_name=None):
+    otp = generate_otp(getattr(settings, 'OTP_LENGTH', 6))
+    validity = 10  # 10 minutes validity for reset OTP
+    
+    cache_key = f'reset_otp_{email}'
+    cache.set(cache_key, otp, timeout=validity * 60)
+    
+    email_sent = send_password_reset_email(email, otp, first_name)
+    if not email_sent:
+        print(f"[WARNING] Reset Email could not be sent to {email}.")
+    
+    return True, otp, None

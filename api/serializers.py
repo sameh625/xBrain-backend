@@ -3,7 +3,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password as django_validate_password
 from django.core.exceptions import ValidationError
 from .models import User, Specialization, Certificate, PointsWallet
-from .utils import validate_password_strength, send_otp_and_store, verify_otp
+from .utils import validate_password_strength, send_otp_and_store, verify_otp, send_reset_otp_and_store
 
 
 class UserRegistrationSerializer(serializers.Serializer):
@@ -298,3 +298,92 @@ class UserSpecializationSerializer(serializers.Serializer):
                 "Either 'specialization_ids' or 'skip' must be provided."
             )
         return data
+
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+
+    def validate_email(self, value):
+        if value and not User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("User with this email not found.")
+        return value
+
+    def save(self):
+        email = self.validated_data['email']
+        user = User.objects.get(email=email)
+        success, otp, error_message = send_reset_otp_and_store(email, user.first_name)
+        
+        if not success:
+            raise serializers.ValidationError({"error": error_message or "Could not send OTP."})
+            
+        return {
+            'email': email,
+            'message': 'Password reset code sent to your email.'
+        }
+
+
+class VerifyResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    otp = serializers.CharField(required=True, min_length=6, max_length=6)
+
+    def validate(self, data):
+        email = data['email']
+        otp = data['otp']
+        
+        from django.core.cache import cache
+        cache_key = f'reset_otp_{email}'
+        stored_otp = cache.get(cache_key)
+        
+        if not stored_otp or stored_otp != otp:
+            raise serializers.ValidationError({"otp": "Invalid or expired OTP code."})
+            
+        # Clear the OTP
+        cache.delete(cache_key)
+        
+        # Generate a reset token valid for 15 mins
+        import uuid
+        reset_token = str(uuid.uuid4())
+        token_cache_key = f'reset_token_{email}'
+        cache.set(token_cache_key, reset_token, timeout=900)
+        
+        data['reset_token'] = reset_token
+        return data
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    token = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, write_only=True)
+
+    def validate(self, data):
+        email = data['email']
+        token = data['token']
+        new_password = data['new_password']
+        
+        from django.core.cache import cache
+        token_cache_key = f'reset_token_{email}'
+        stored_token = cache.get(token_cache_key)
+        
+        if not stored_token or stored_token != token:
+            raise serializers.ValidationError({"token": "Invalid or expired reset token."})
+            
+        is_valid, error = validate_password_strength(new_password)
+        if not is_valid:
+            raise serializers.ValidationError({"new_password": error})
+            
+        return data
+
+    def save(self):
+        email = self.validated_data['email']
+        new_password = self.validated_data['new_password']
+        
+        user = User.objects.get(email=email)
+        user.set_password(new_password)
+        user.save()
+        
+        from django.core.cache import cache
+        cache.delete(f'reset_token_{email}')
+        
+        return {
+            'message': 'Password reset successfully. You can now log in.'
+        }

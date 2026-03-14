@@ -13,6 +13,9 @@ from .serializers import (
     UserDetailSerializer,
     SpecializationSerializer,
     UserSpecializationSerializer,
+    ForgotPasswordSerializer,
+    VerifyResetOTPSerializer,
+    ResetPasswordSerializer,
 )
 from .models import User, Specialization, UserSpecialization
 
@@ -223,3 +226,35 @@ class UserSpecializationView(APIView):
             },
             status=status.HTTP_200_OK
         )
+
+
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        if serializer.is_valid():
+            result = serializer.save()
+            return Response(result, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class VerifyResetOTPView(APIView):
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        serializer = VerifyResetOTPSerializer(data=request.data)
+        if serializer.is_valid():
+            return Response(serializer.validated_data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ResetPasswordView(APIView):
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        if serializer.is_valid():
+            result = serializer.save()
+            return Response(result, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

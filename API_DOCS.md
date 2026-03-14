@@ -188,7 +188,104 @@ Resends the OTP to the email. Only works if there's a pending registration.
 
 ---
 
-### 5. Refresh Token
+### 5. Forgot Password
+`POST /api/auth/forgot-password/`
+
+Initiates the password reset process by sending an OTP to the user's email.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `email` | `string` | yes |
+
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response (200):**
+```json
+{
+  "email": "user@example.com",
+  "message": "Password reset code sent to your email."
+}
+```
+
+**Possible errors (400):**
+| Scenario | Example message |
+|----------|-----------------|
+| Email not found | `"User with this email not found."` |
+
+---
+
+### 6. Verify Reset OTP
+`POST /api/auth/verify-reset-otp/`
+
+Verifies the reset OTP and returns a temporary token needed to set the new password.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `email` | `string` | yes |
+| `otp`   | `string` | yes (exactly 6 characters) |
+
+```json
+{
+  "email": "user@example.com",
+  "otp": "123456"
+}
+```
+
+**Response (200):**
+```json
+{
+  "email": "user@example.com",
+  "otp": "123456",
+  "reset_token": "a1b2c3d4-e5f6-7890-uuid-here"
+}
+```
+
+**Possible errors (400):**
+| Scenario | Error key |
+|----------|-----------|
+| Wrong/expired OTP | `otp` |
+
+---
+
+### 7. Reset Password
+`POST /api/auth/reset-password/`
+
+Sets the new password using the reset token obtained from the previous step.
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `email`        | `string` | yes | |
+| `token`        | `string` | yes | The `reset_token` from step 6 |
+| `new_password` | `string` | yes | min 8 chars, uppercase + lowercase + number + special char |
+
+```json
+{
+  "email": "user@example.com",
+  "token": "a1b2c3d4-e5f6-7890-uuid-here",
+  "new_password": "NewSecurePass123!"
+}
+```
+
+**Response (200):**
+```json
+{
+  "message": "Password reset successfully. You can now log in."
+}
+```
+
+**Possible errors (400):**
+| Scenario | Error key |
+|----------|-----------|
+| Wrong/expired token | `token` |
+| Weak password | `new_password` |
+
+---
+
+### 8. Refresh Token
 `POST /api/auth/token/refresh/`
 
 | Field | Type | Required |
@@ -318,9 +415,12 @@ Auth errors on protected endpoints return **401**:
 | 2 | POST | `/api/auth/verify-email/` | No | Verify OTP + create account |
 | 3 | POST | `/api/auth/login/` | No | Login (email or username) |
 | 4 | POST | `/api/auth/resend-otp/` | No | Resend OTP |
-| 5 | POST | `/api/auth/token/refresh/` | No | Refresh expired tokens |
-| 6 | GET | `/api/users/me/` | Yes | Get my profile |
-| 7 | GET | `/api/specializations/` | Yes | List all specializations |
-| 8 | GET | `/api/users/me/specializations/` | Yes | My specializations |
-| 8 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
-| 8 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
+| 5 | POST | `/api/auth/forgot-password/` | No | Send password reset OTP |
+| 6 | POST | `/api/auth/verify-reset-otp/` | No | Verify reset OTP |
+| 7 | POST | `/api/auth/reset-password/` | No | Set new password |
+| 8 | POST | `/api/auth/token/refresh/` | No | Refresh expired tokens |
+| 9 | GET | `/api/users/me/` | Yes | Get my profile |
+| 10 | GET | `/api/specializations/` | Yes | List all specializations |
+| 11 | GET | `/api/users/me/specializations/` | Yes | My specializations |
+| 11 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
+| 11 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |

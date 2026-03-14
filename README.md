@@ -3,9 +3,9 @@
 This is the backend API for the xBrain Flutter mobile application, built with Django and Django REST Framework (DRF).
 
 ## Live Application
-🌍 **Live API Base URL:** `https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net`
+**Live API Base URL:** `https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net`
 
-📖 **Interactive API Documentation (Swagger):** [https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net/api/docs/](https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net/api/docs/)
+**Interactive API Documentation (Swagger):** [https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net/api/docs/](https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net/api/docs/)
 
 ## Features
 - **JWT Authentication** (Login, Register).

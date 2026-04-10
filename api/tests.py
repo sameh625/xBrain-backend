@@ -773,3 +773,101 @@ class UserSpecializationTests(TestCase):
 
         # Should either succeed with 1 entry or return 400
         self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+
+
+# ============================================================
+# PROFILE UPDATE TESTS
+# ============================================================
+class ProfileUpdateTests(TestCase):
+    """Tests for PATCH /api/users/me/"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = reverse('api:user-profile')
+        self.user = User.objects.create_user(
+            email='testuser@example.com',
+            username='testuser1',
+            password='TestPass123!',
+            first_name='Test',
+            last_name='User',
+            phone_number='+1111111111',
+            bio='Original bio',
+        )
+        PointsWallet.objects.get_or_create(user=self.user)
+
+    def test_update_bio(self):
+        """Can update bio field"""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(self.url, {'bio': 'Updated bio'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.bio, 'Updated bio')
+
+    def test_update_first_name(self):
+        """Can update first_name field"""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(self.url, {'first_name': 'NewName'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'NewName')
+
+    def test_update_multiple_fields(self):
+        """Can update multiple fields at once"""
+        self.client.force_authenticate(user=self.user)
+        data = {
+            'first_name': 'Updated',
+            'last_name': 'Name',
+            'bio': 'New bio text',
+        }
+        response = self.client.patch(self.url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Updated')
+        self.assertEqual(self.user.last_name, 'Name')
+        self.assertEqual(self.user.bio, 'New bio text')
+
+    def test_update_returns_full_profile(self):
+        """PATCH response contains the full user profile"""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(self.url, {'bio': 'test'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('id', response.data)
+        self.assertIn('email', response.data)
+        self.assertIn('wallet', response.data)
+        self.assertIn('specializations', response.data)
+
+    def test_upload_profile_image(self):
+        """Can upload a profile image via multipart/form-data"""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.client.force_authenticate(user=self.user)
+
+        # Create a minimal valid image
+        import io
+        from PIL import Image
+        img = Image.new('RGB', (100, 100), color='red')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        buf.seek(0)
+        image_file = SimpleUploadedFile('test.jpg', buf.read(), content_type='image/jpeg')
+
+        response = self.client.patch(self.url, {'profile_image': image_file}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.profile_image)
+        self.assertIsNotNone(response.data['profile_image_url'])
+
+    def test_partial_update_does_not_clear_other_fields(self):
+        """Updating one field should not reset other fields"""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(self.url, {'bio': 'New bio'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Test')  # unchanged
+        self.assertEqual(self.user.last_name, 'User')    # unchanged
+        self.assertEqual(self.user.bio, 'New bio')        # updated
+
+    def test_unauthenticated_update_returns_401(self):
+        """Unauthenticated PATCH request returns 401"""
+        response = self.client.patch(self.url, {'bio': 'hack'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+

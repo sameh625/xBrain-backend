@@ -55,6 +55,8 @@ migrations/__pycache__/
 # Documentation
 *.md
 .specify/
+Sprint_Report.docx
+Sprint_Report.pdf
 
 # Secrets
 PRODUCTION_ENV_VARS_TO_COPY.txt

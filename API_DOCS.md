@@ -304,11 +304,11 @@ Sets the new password using the reset token obtained from the previous step.
 }
 ```
 
-Save both — the old refresh token is blacklisted. Refresh token is valid for 7 days.
+Save both - the old refresh token is blacklisted. Refresh token is valid for 7 days.
 
 ### How tokens work
 
-After login or verification you get two tokens. The **access token** goes in every request header to prove you're logged in — it expires after 1 hour. The **refresh token** is only used to get a new access token when the old one expires, so the user doesn't have to log in again. Store both with `flutter_secure_storage`. If a request returns 401, call `/api/auth/token/refresh/`. If the refresh token is also expired (7 days), redirect to login.
+After login or verification you get two tokens. The **access token** goes in every request header to prove you're logged in - it expires after 1 hour. The **refresh token** is only used to get a new access token when the old one expires, so the user doesn't have to log in again. Store both with `flutter_secure_storage`. If a request returns 401, call `/api/auth/token/refresh/`. If the refresh token is also expired (7 days), redirect to login.
 
 ---
 
@@ -326,7 +326,7 @@ Returns the current user's full profile (same shape as the user object in login/
 ### 10. Update My Profile
 `PATCH /api/users/me/`
 
-Updates the authenticated user's profile. Uses `Content-Type: multipart/form-data` to support profile image upload. All fields are optional — only send the fields you want to update.
+Updates the authenticated user's profile. Uses `Content-Type: multipart/form-data` to support profile image upload. All fields are optional - only send the fields you want to update.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -368,7 +368,7 @@ Returns `"message": "No specializations available"` with empty `results` if none
 
 ### 12. My Specializations
 
-**GET** `/api/users/me/specializations/` — returns current specializations and form status
+**GET** `/api/users/me/specializations/` - returns current specializations and form status
 
 **Response (200):**
 ```json
@@ -378,7 +378,7 @@ Returns `"message": "No specializations available"` with empty `results` if none
 }
 ```
 
-**PUT** `/api/users/me/specializations/` — set specializations (replaces all existing ones)
+**PUT** `/api/users/me/specializations/` - set specializations (replaces all existing ones)
 
 | Field | Type | Required |
 |-------|------|----------|
@@ -390,7 +390,7 @@ Returns `"message": "No specializations available"` with empty `results` if none
 }
 ```
 
-**PATCH** `/api/users/me/specializations/` — skip the specialization selection form
+**PATCH** `/api/users/me/specializations/` - skip the specialization selection form
 
 | Field | Type | Required |
 |-------|------|----------|
@@ -445,3 +445,31 @@ Auth errors on protected endpoints return **401**:
 | 12 | GET | `/api/users/me/specializations/` | Yes | My specializations |
 | 12 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
 | 12 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
+
+---
+
+## Important Notes
+
+### Profile Image Upload
+
+`profile_image` has been **removed** from the Register endpoint. Registration is now pure JSON - no `multipart/form-data` needed.
+
+To upload a profile image, use the **Update Profile** endpoint after the user has registered and received their token:
+
+```
+PATCH /api/users/me/
+Content-Type: multipart/form-data
+Authorization: Bearer <access_token>
+```
+
+All fields are optional - send only what you want to update:
+- `first_name`
+- `last_name`
+- `phone_number`
+- `bio`
+- `profile_image` (file)
+
+**User flow:**
+1. `POST /api/auth/register/` => send JSON, get OTP email
+2. `POST /api/auth/verify-email/` => send OTP, get `access_token`
+3. `PATCH /api/users/me/` => upload profile image with the token

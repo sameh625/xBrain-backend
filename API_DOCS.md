@@ -2,7 +2,7 @@
 
 **Base URL:** `https://xbrain-backend-chbfe7hscpbqergn.francecentral-01.azurewebsites.net`
 
-All requests use `Content-Type: application/json`.
+All requests use `Content-Type: application/json` unless stated otherwise.
 
 Protected endpoints need the header: `Authorization: Bearer <access_token>`
 ---
@@ -23,7 +23,6 @@ Sends an OTP to the user's email. No account is created yet.
 | `last_name` | `string` | yes | max 50 chars |
 | `phone_number` | `string` | yes | 7-15 digits, optional `+` prefix, unique |
 | `bio` | `string` | no | max 500 chars |
-| `profile_image` | `file` | no | image upload |
 
 ```json
 {
@@ -33,8 +32,7 @@ Sends an OTP to the user's email. No account is created yet.
   "first_name": "John",
   "last_name": "Doe",
   "phone_number": "+1234567890",
-  "bio": "optional bio text",
-  "profile_image": null
+  "bio": "optional bio text"
 }
 ```
 
@@ -318,14 +316,36 @@ After login or verification you get two tokens. The **access token** goes in eve
 
 These require: `Authorization: Bearer <access_token>`
 
-### 6. Get My Profile
+### 9. Get My Profile
 `GET /api/users/me/`
 
 Returns the current user's full profile (same shape as the user object in login/verify responses).
 
 ---
 
-### 7. Get All Specializations
+### 10. Update My Profile
+`PATCH /api/users/me/`
+
+Updates the authenticated user's profile. Uses `Content-Type: multipart/form-data` to support profile image upload. All fields are optional — only send the fields you want to update.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `first_name` | `string` | no | max 50 chars |
+| `last_name` | `string` | no | max 50 chars |
+| `phone_number` | `string` | no | 7-15 digits, optional `+` prefix |
+| `bio` | `string` | no | max 500 chars |
+| `profile_image` | `file` | no | image file (jpg, png, etc.) |
+
+**Response (200):** Returns the full updated user profile (same shape as GET `/api/users/me/`).
+
+**Possible errors (400):**
+| Scenario | Example message |
+|----------|-----------------|
+| Invalid image file | `"Upload a valid image."` |
+
+---
+
+### 11. Get All Specializations
 `GET /api/specializations/`
 
 **Response (200):**
@@ -346,7 +366,7 @@ Returns `"message": "No specializations available"` with empty `results` if none
 
 ---
 
-### 8. My Specializations
+### 12. My Specializations
 
 **GET** `/api/users/me/specializations/` — returns current specializations and form status
 
@@ -414,13 +434,14 @@ Auth errors on protected endpoints return **401**:
 | 1 | POST | `/api/auth/register/` | No | Send OTP to email |
 | 2 | POST | `/api/auth/verify-email/` | No | Verify OTP + create account |
 | 3 | POST | `/api/auth/login/` | No | Login (email or username) |
-| 4 | POST | `/api/auth/resend-otp/` | No | Resend OTP |
+| 4 | POST | `/api/auth/resend-otp/` | No | Resend registration OTP |
 | 5 | POST | `/api/auth/forgot-password/` | No | Send password reset OTP |
 | 6 | POST | `/api/auth/verify-reset-otp/` | No | Verify reset OTP |
 | 7 | POST | `/api/auth/reset-password/` | No | Set new password |
 | 8 | POST | `/api/auth/token/refresh/` | No | Refresh expired tokens |
 | 9 | GET | `/api/users/me/` | Yes | Get my profile |
-| 10 | GET | `/api/specializations/` | Yes | List all specializations |
-| 11 | GET | `/api/users/me/specializations/` | Yes | My specializations |
-| 11 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
-| 11 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
+| 10 | PATCH | `/api/users/me/` | Yes | Update profile / upload image |
+| 11 | GET | `/api/specializations/` | Yes | List all specializations |
+| 12 | GET | `/api/users/me/specializations/` | Yes | My specializations |
+| 12 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
+| 12 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |

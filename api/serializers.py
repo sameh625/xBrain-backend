@@ -14,7 +14,6 @@ class UserRegistrationSerializer(serializers.Serializer):
     last_name = serializers.CharField(required=True, max_length=50)
     phone_number = serializers.CharField(required=True, max_length=15)
     bio = serializers.CharField(required=False, allow_blank=True, max_length=500)
-    profile_image = serializers.ImageField(required=False, allow_null=True)
     
     def validate_email(self, value):
         from django.core.cache import cache
@@ -103,10 +102,6 @@ class VerifyOTPSerializer(serializers.Serializer):
                 phone_number=registration_data['phone_number'],
                 bio=registration_data.get('bio', ''),
             )
-            
-            if 'profile_image' in registration_data and registration_data['profile_image']:
-                user.profile_image = registration_data['profile_image']
-                user.save()
             
             cache.delete(cache_key)
             
@@ -227,6 +222,20 @@ class UserDetailSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.profile_image.url)
             return obj.profile_image.url
         return None
+
+
+class UpdateProfileSerializer(serializers.ModelSerializer):
+    profile_image = serializers.ImageField(required=False, allow_null=True)
+
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'phone_number', 'bio', 'profile_image']
+        extra_kwargs = {
+            'first_name': {'required': False},
+            'last_name': {'required': False},
+            'phone_number': {'required': False},
+            'bio': {'required': False},
+        }
 
 
 class ResendOTPSerializer(serializers.Serializer):

@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
@@ -12,6 +13,7 @@ from .serializers import (
     UserLoginSerializer,
     ResendOTPSerializer,
     UserDetailSerializer,
+    UpdateProfileSerializer,
     SpecializationSerializer,
     UserSpecializationSerializer,
     ForgotPasswordSerializer,
@@ -153,6 +155,7 @@ class ResendOTPView(APIView):
 
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(
         summary="Get current user profile",
@@ -163,12 +166,22 @@ class UserProfileView(APIView):
         serializer = UserDetailSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    @extend_schema(exclude=True)
+    @extend_schema(
+        summary="Update current user profile",
+        description="Updates the authenticated user's profile fields. Supports multipart/form-data for profile image upload. All fields are optional — only send the fields you want to update.",
+        request={'multipart/form-data': UpdateProfileSerializer},
+        responses={
+            200: UserDetailSerializer,
+            400: OpenApiResponse(description="Validation error")
+        }
+    )
     def patch(self, request):
-        return Response(
-            {"message": "Profile update not yet implemented"},
-            status=status.HTTP_501_NOT_IMPLEMENTED
-        )
+        serializer = UpdateProfileSerializer(request.user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            user_serializer = UserDetailSerializer(request.user, context={'request': request})
+            return Response(user_serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SpecializationListView(APIView):

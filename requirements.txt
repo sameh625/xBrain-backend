@@ -18,3 +18,5 @@ whitenoise==6.6.0
 
 django-filter==24.3
 drf-spectacular==0.29.0
+
+django-storages[azure]==1.14.4

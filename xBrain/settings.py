@@ -145,10 +145,31 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"  # Where collectstatic puts files for production
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"  # Efficient storage for production
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+
+USE_AZURE_STORAGE = config('USE_AZURE_STORAGE', default=False, cast=bool)
+
+STORAGES = {
+    "default": {
+        "BACKEND": (
+            "storages.backends.azure_storage.AzureStorage"
+            if USE_AZURE_STORAGE
+            else "django.core.files.storage.FileSystemStorage"
+        ),
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+# Azure Blob Storage credentials — only required if USE_AZURE_STORAGE is True
+if USE_AZURE_STORAGE:
+    AZURE_ACCOUNT_NAME = config('AZURE_ACCOUNT_NAME')
+    AZURE_ACCOUNT_KEY = config('AZURE_ACCOUNT_KEY')
+    AZURE_CONTAINER = config('AZURE_CONTAINER', default='media')
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

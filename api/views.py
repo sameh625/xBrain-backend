@@ -168,8 +168,15 @@ class UserProfileView(APIView):
 
     @extend_schema(
         summary="Update current user profile",
-        description="Updates the authenticated user's profile fields. Supports multipart/form-data for profile image upload. All fields are optional — only send the fields you want to update.",
-        request={'multipart/form-data': UpdateProfileSerializer},
+        description=(
+            "Updates the authenticated user's profile fields. All fields are optional — "
+            "only send the fields you want to update. "
+            "Use application/json for text-only updates, or multipart/form-data when uploading a profile image."
+        ),
+        request={
+            'application/json': UpdateProfileSerializer,
+            'multipart/form-data': UpdateProfileSerializer,
+        },
         responses={
             200: UserDetailSerializer,
             400: OpenApiResponse(description="Validation error")

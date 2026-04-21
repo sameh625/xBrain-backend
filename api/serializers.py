@@ -237,6 +237,21 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
             'bio': {'required': False},
         }
 
+    def to_internal_value(self, data):
+        # Swagger's multipart form sends empty strings for unfilled fields
+        # (including file fields with filename="") — treat them as "not provided".
+        cleaned = {}
+        for field_name, value in data.items():
+            if field_name == 'profile_image':
+                # Empty string, empty UploadedFile, or explicit None → skip (don't update)
+                if value in (None, '') or (hasattr(value, 'size') and value.size == 0):
+                    continue
+            elif isinstance(value, str) and value == '':
+                # Don't overwrite existing fields with empty strings from Swagger multipart
+                continue
+            cleaned[field_name] = value
+        return super().to_internal_value(cleaned)
+
 
 class ResendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)

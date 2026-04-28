@@ -96,17 +96,33 @@ DATABASES = {
         conn_max_age=600
     )
 }
+# Ping the connection before reuse — avoids serving stale/dropped connections
+# under multi-worker concurrency.
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 AUTH_USER_MODEL = 'api.User'
 
-# Cache Configuration (for OTP storage)
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake',
-        'TIMEOUT': 300,  # 5 minutes default
+# Cache Configuration (for OTP storage, login lockout counters, password reset tokens)
+# Uses Redis when REDIS_URL is set (production / multi-worker safe).
+# Falls back to LocMemCache for local dev when REDIS_URL is unset.
+# WARNING: LocMemCache is per-process — multi-worker Gunicorn breaks cross-worker state with it.
+REDIS_URL = config('REDIS_URL', default=None)
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+            'TIMEOUT': 300,
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'xbrain-default',
+            'TIMEOUT': 300,
+        }
+    }
 
 
 # Password validation

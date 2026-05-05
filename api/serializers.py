@@ -2,9 +2,9 @@ from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password as django_validate_password
 from django.core.exceptions import ValidationError
-from .models import User, Specialization, Certificate, PointsWallet
+from .models import User, Specialization, Certificate, PointsWallet, Question, Answer
 from .utils import validate_password_strength, send_otp_and_store, verify_otp, send_reset_otp_and_store
-
+from drf_spectacular.utils import extend_schema_field
 
 class UserRegistrationSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
@@ -411,3 +411,183 @@ class ResetPasswordSerializer(serializers.Serializer):
         return {
             'message': 'Password reset successfully. You can now log in.'
         }
+
+class PublicAuthorSerializer(serializers.ModelSerializer):
+    """Compact public profile used as the nested 'author' on Q&A responses."""
+    profile_image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'profile_image_url']
+
+    def get_profile_image_url(self, obj) -> str | None:
+        if obj.profile_image:
+            return obj.profile_image.url
+        return None
+
+
+class SpecializationCompactSerializer(serializers.ModelSerializer):
+    """Compact specialization (id and name) for embedding in Question payloads."""
+
+    class Meta:
+        model = Specialization
+        fields = ['id', 'name']
+
+
+class QuestionListSerializer(serializers.ModelSerializer):
+    """List representation used by GET /api/questions/.
+
+    Returns a content preview, the question's specializations, and a single
+    `answers_count` that totals top-level answers and replies together."""
+    author = PublicAuthorSerializer(read_only=True)
+    content_preview = serializers.SerializerMethodField()
+    specializations = SpecializationCompactSerializer(many=True, read_only=True)
+    answers_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Question
+        fields = [
+            'id', 'author', 'content_preview', 'specializations',
+            'is_resolved', 'answers_count', 'created_at',
+        ]
+
+    def get_content_preview(self, obj) -> str:
+        return obj.content[:120]
+
+
+class AnswerSerializer(serializers.ModelSerializer):
+    """Read representation for an Answer or a Reply.
+
+    Always includes the parent question's UUID so clients fetching a single
+    answer can resolve its parent question without an extra request."""
+    author = PublicAuthorSerializer(read_only=True)
+    question = serializers.PrimaryKeyRelatedField(read_only=True)
+    parent_answer = serializers.PrimaryKeyRelatedField(read_only=True)
+    replies_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Answer
+        fields = [
+            'id', 'question', 'author', 'content', 'parent_answer',
+            'replies_count', 'created_at', 'updated_at',
+        ]
+
+
+class TopLevelAnswerWithRepliesSerializer(serializers.ModelSerializer):
+    """Top-level answer representation that embeds the first replies inline.
+
+    Used inside the question detail response so the most common screen
+    can render without an extra round-trip per answer."""
+    author = PublicAuthorSerializer(read_only=True)
+    question = serializers.PrimaryKeyRelatedField(read_only=True)
+    parent_answer = serializers.PrimaryKeyRelatedField(read_only=True)
+    replies_count = serializers.IntegerField(read_only=True, default=0)
+    replies = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Answer
+        fields = [
+            'id', 'question', 'author', 'content', 'parent_answer',
+            'replies_count', 'replies', 'created_at', 'updated_at',
+        ]
+
+    @extend_schema_field(AnswerSerializer(many=True))
+    def get_replies(self, obj):
+        first_replies = obj.replies.all()[:2]
+        return AnswerSerializer(first_replies, many=True, context=self.context).data
+
+
+class QuestionDetailSerializer(serializers.ModelSerializer):
+    """Detail representation used by GET /api/questions/{id}/.
+
+    Embeds the first ten top-level answers with their first two replies each,
+    and exposes a single `answers_count` totaling top-level answers and replies."""
+    author = PublicAuthorSerializer(read_only=True)
+    specializations = SpecializationCompactSerializer(many=True, read_only=True)
+    answers_count = serializers.IntegerField(read_only=True)
+    answers = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Question
+        fields = [
+            'id', 'author', 'content', 'specializations',
+            'is_resolved', 'resolved_at',
+            'answers_count', 'answers',
+            'created_at', 'updated_at',
+        ]
+
+    @extend_schema_field(TopLevelAnswerWithRepliesSerializer(many=True))
+    def get_answers(self, obj):
+        from django.db.models import Count
+        top_level = (
+            obj.answers
+               .filter(parent_answer__isnull=True)
+               .annotate(replies_count=Count('replies'))
+               .order_by('created_at')[:10]
+        )
+        return TopLevelAnswerWithRepliesSerializer(top_level, many=True, context=self.context).data
+
+
+class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
+    """Write representation for creating or updating a Question.
+
+    Accepts the question's content, between one and three specialization UUIDs,
+    and (on update) the resolved flag. The author is set by the view from the
+    authenticated request and is not accepted from the client."""
+    specializations = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Specialization.objects.all(),
+        required=True,
+    )
+
+    class Meta:
+        model = Question
+        fields = ['id', 'content', 'specializations', 'is_resolved']
+        read_only_fields = ['id']
+
+    def validate_specializations(self, value):
+        if len(value) < 1:
+            raise serializers.ValidationError("At least one specialization is required.")
+        if len(value) > 3:
+            raise serializers.ValidationError("A question can have at most 3 specializations.")
+        return value
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value
+
+
+class AnswerCreateSerializer(serializers.ModelSerializer):
+    """Write representation for creating an answer or a reply.
+
+    The client sends only the answer's content. The parent question, parent
+    answer (for replies), and author are filled in by the view based on the
+    URL and the authenticated request."""
+
+    class Meta:
+        model = Answer
+        fields = ['id', 'content']
+        read_only_fields = ['id']
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value
+
+
+class AnswerUpdateSerializer(serializers.ModelSerializer):
+    """Write representation for editing an existing answer or reply.
+
+    Only the answer's content may be changed after creation; the parent
+    question and parent answer are fixed at creation time."""
+
+    class Meta:
+        model = Answer
+        fields = ['id', 'content']
+        read_only_fields = ['id']
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value

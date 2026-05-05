@@ -367,6 +367,87 @@ class Certificate(models.Model):
         indexes = [
             models.Index(fields=['user'], name='idx_cert_user'),
         ]
-    
+
     def __str__(self):
         return f"{self.title} - {self.user.username}"
+
+
+class Question(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    author = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='questions',
+    )
+    content = models.TextField(max_length=5000)
+    specializations = models.ManyToManyField(
+        'Specialization',
+        related_name='questions',
+    )
+    is_resolved = models.BooleanField(default=False)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'questions'
+        verbose_name = _('question')
+        verbose_name_plural = _('questions')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-created_at'], name='idx_q_created'),
+            models.Index(fields=['author', '-created_at'], name='idx_q_author_created'),
+        ]
+
+    def __str__(self):
+        return f"Question by {self.author.username}: {self.content[:50]}"
+
+
+class Answer(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    question = models.ForeignKey(
+        'Question',
+        on_delete=models.CASCADE,
+        related_name='answers',
+    )
+    author = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='answers',
+    )
+    content = models.TextField(max_length=5000)
+    parent_answer = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'answers'
+        verbose_name = _('answer')
+        verbose_name_plural = _('answers')
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['question', 'parent_answer', 'created_at'], name='idx_a_q_parent_created'),
+            models.Index(fields=['author', '-created_at'], name='idx_a_author_created'),
+        ]
+
+    def clean(self):
+        if self.parent_answer and self.parent_answer.parent_answer_id is not None:
+            raise ValidationError('Replies cannot have replies — depth limit is 1.')
+
+    def __str__(self):
+        kind = "Reply" if self.parent_answer_id else "Answer"
+        return f"{kind} by {self.author.username} on Q {self.question_id}"

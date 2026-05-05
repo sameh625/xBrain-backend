@@ -1,11 +1,16 @@
-from rest_framework import status
+from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
+from django.db import transaction
+from django.db.models import Count, Q
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from .serializers import (
     UserRegistrationSerializer,
@@ -19,8 +24,15 @@ from .serializers import (
     ForgotPasswordSerializer,
     VerifyResetOTPSerializer,
     ResetPasswordSerializer,
+    QuestionListSerializer,
+    QuestionDetailSerializer,
+    QuestionCreateUpdateSerializer,
+    AnswerSerializer,
+    AnswerCreateSerializer,
+    AnswerUpdateSerializer,
 )
-from .models import User, Specialization, UserSpecialization
+from .models import User, Specialization, UserSpecialization, Question, Answer
+from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor
 
 
 class RegisterView(APIView):
@@ -378,3 +390,341 @@ class ResetPasswordView(APIView):
             result = serializer.save()
             return Response(result, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+def _question_queryset_with_counts():
+    """Annotated queryset used by both list and detail to avoid N+1 on counts.
+
+    `answers_count` is a Facebook-style total: counts top-level answers PLUS replies.
+    Same shape as "X comments" on a social media post."""
+    return (
+        Question.objects
+        .select_related('author')
+        .prefetch_related('specializations')
+        .annotate(
+            answers_count=Count('answers', distinct=True),
+        )
+    )
+
+def _answer_queryset_with_counts():
+    return (
+        Answer.objects
+        .select_related('author', 'question')
+        .annotate(replies_count=Count('replies'))
+    )
+
+
+class QuestionListCreateView(generics.ListCreateAPIView):
+    """GET /api/questions/ — paginated newest-first list.
+    POST /api/questions/ — create a question (auth required)."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return QuestionCreateUpdateSerializer
+        return QuestionListSerializer
+
+    def get_queryset(self):
+        qs = _question_queryset_with_counts().order_by('-created_at')
+        params = self.request.query_params
+
+        author = params.get('author')
+        if author:
+            qs = qs.filter(author_id=author)
+
+        specialization = params.get('specialization')
+        if specialization:
+            qs = qs.filter(specializations__id=specialization).distinct()
+
+        is_resolved = params.get('is_resolved')
+        if is_resolved is not None:
+            if is_resolved.lower() in ('true', '1'):
+                qs = qs.filter(is_resolved=True)
+            elif is_resolved.lower() in ('false', '0'):
+                qs = qs.filter(is_resolved=False)
+
+        q = params.get('q')
+        if q:
+            qs = qs.filter(content__icontains=q)
+
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="List questions",
+        description="Paginated newest-first list of questions. Filters: ?author=, ?specialization=, ?is_resolved=, ?q=.",
+        responses={200: QuestionListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Create a question",
+        description="Authenticated users only. Requires content (1–5000 chars) and 1–3 specialization UUIDs.",
+        request=QuestionCreateUpdateSerializer,
+        responses={
+            201: QuestionDetailSerializer,
+            400: OpenApiResponse(description="Validation error (e.g., zero or >3 specs, empty content)."),
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question = serializer.save(author=request.user)
+
+        question = _question_queryset_with_counts().get(pk=question.pk)
+        return Response(
+            QuestionDetailSerializer(question, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/questions/{id}/."""
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrReadOnly]
+
+    def get_queryset(self):
+        return _question_queryset_with_counts()
+
+    def get_serializer_class(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return QuestionCreateUpdateSerializer
+        return QuestionDetailSerializer
+
+    def update(self, request, *args, **kwargs):
+        # After update, return the detail shape (with annotations) instead of the create/update shape.
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        instance = self.get_queryset().get(pk=instance.pk)
+        return Response(QuestionDetailSerializer(instance, context={'request': request}).data)
+
+    @extend_schema(tags=['Q&A'], summary="Get a question with its first 10 answers (and 2 replies each).")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Update a question (author only)",
+        request=QuestionCreateUpdateSerializer,
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    @extend_schema(tags=['Q&A'], summary="Delete a question (author only). Cascades to answers and replies.")
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class QuestionResolveView(APIView):
+    """POST /api/questions/{id}/resolve/ — asker only. Idempotent."""
+    permission_classes = [IsAuthenticated, IsQuestionAuthor]
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Mark a question as resolved (asker only). Idempotent.",
+        responses={
+            200: QuestionDetailSerializer,
+            403: OpenApiResponse(description="Only the question's author may resolve it."),
+            404: OpenApiResponse(description="Question not found."),
+        },
+        request=None,
+    )
+    def post(self, request, pk):
+        question = get_object_or_404(Question, pk=pk)
+        self.check_object_permissions(request, question)
+
+        if not question.is_resolved:
+            with transaction.atomic():
+                question.is_resolved = True
+                question.resolved_at = timezone.now()
+                question.save(update_fields=['is_resolved', 'resolved_at', 'updated_at'])
+
+        question = _question_queryset_with_counts().get(pk=pk)
+        return Response(
+            QuestionDetailSerializer(question, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class QuestionUnresolveView(APIView):
+    """POST /api/questions/{id}/unresolve/ — asker only. Idempotent."""
+    permission_classes = [IsAuthenticated, IsQuestionAuthor]
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Mark a resolved question as unresolved (asker only). Idempotent.",
+        responses={
+            200: QuestionDetailSerializer,
+            403: OpenApiResponse(description="Only the question's author may unresolve it."),
+            404: OpenApiResponse(description="Question not found."),
+        },
+        request=None,
+    )
+    def post(self, request, pk):
+        question = get_object_or_404(Question, pk=pk)
+        self.check_object_permissions(request, question)
+
+        if question.is_resolved:
+            with transaction.atomic():
+                question.is_resolved = False
+                question.resolved_at = None
+                question.save(update_fields=['is_resolved', 'resolved_at', 'updated_at'])
+
+        question = _question_queryset_with_counts().get(pk=pk)
+        return Response(
+            QuestionDetailSerializer(question, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+
+class AnswerListCreateView(generics.ListCreateAPIView):
+    """GET /api/questions/{question_id}/answers/ — list top-level answers under a question.
+    POST same URL — create a top-level answer."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AnswerCreateSerializer
+        return AnswerSerializer
+
+    def get_queryset(self):
+        question_id = self.kwargs['question_id']
+        get_object_or_404(Question, pk=question_id)
+        return (
+            _answer_queryset_with_counts()
+            .filter(question_id=question_id, parent_answer__isnull=True)
+            .order_by('created_at')
+        )
+
+    def create(self, request, *args, **kwargs):
+        question = get_object_or_404(Question, pk=self.kwargs['question_id'])
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        answer = serializer.save(
+            author=request.user,
+            question=question,
+            parent_answer=None,
+        )
+        answer = _answer_queryset_with_counts().get(pk=answer.pk)
+        return Response(
+            AnswerSerializer(answer, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(tags=['Q&A'], summary="List top-level answers for a question.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Post a top-level answer to a question.",
+        request=AnswerCreateSerializer,
+        responses={201: AnswerSerializer, 401: OpenApiResponse(description="Authentication required."), 404: OpenApiResponse(description="Question not found.")},
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+class AnswerDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/answers/{id}/ — works for both top-level answers and replies."""
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrReadOnly]
+
+    def get_queryset(self):
+        return _answer_queryset_with_counts()
+
+    def get_serializer_class(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return AnswerUpdateSerializer
+        return AnswerSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        instance = self.get_queryset().get(pk=instance.pk)
+        return Response(AnswerSerializer(instance, context={'request': request}).data)
+
+    @extend_schema(tags=['Q&A'], summary="Get a single answer or reply.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Update an answer or reply (author only). Only content can be edited.",
+        request=AnswerUpdateSerializer,
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    @extend_schema(tags=['Q&A'], summary="Delete an answer or reply (author only). Deleting a top-level answer cascades to replies.")
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class ReplyListCreateView(generics.ListCreateAPIView):
+    """GET /api/answers/{id}/replies/ — list replies under a top-level answer.
+    POST same URL — post a reply to that answer (depth-1)."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AnswerCreateSerializer
+        return AnswerSerializer
+
+    def get_queryset(self):
+        parent_id = self.kwargs['pk']
+        get_object_or_404(Answer, pk=parent_id)
+        return (
+            _answer_queryset_with_counts()
+            .filter(parent_answer_id=parent_id)
+            .order_by('created_at')
+        )
+
+    def create(self, request, *args, **kwargs):
+        parent = get_object_or_404(Answer, pk=self.kwargs['pk'])
+
+        if parent.parent_answer_id is not None:
+            raise DRFValidationError(
+                {"parent_answer": "Replies cannot have replies — depth limit is 1."}
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reply = serializer.save(
+            author=request.user,
+            question=parent.question,
+            parent_answer=parent,
+        )
+        reply = _answer_queryset_with_counts().get(pk=reply.pk)
+        return Response(
+            AnswerSerializer(reply, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(tags=['Q&A'], summary="List replies under a specific answer.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Q&A'],
+        summary="Post a reply to a specific answer.",
+        description="The parent must be a top-level answer (depth-1 threading). Replying to a reply returns 400.",
+        request=AnswerCreateSerializer,
+        responses={
+            201: AnswerSerializer,
+            400: OpenApiResponse(description="Cannot reply to a reply (depth-1 limit)."),
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Parent answer not found."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)

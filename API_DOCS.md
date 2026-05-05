@@ -406,6 +406,353 @@ Both PUT and PATCH set `specialization_form_completed_at` to the current time.
 
 ---
 
+## Q&A Endpoints
+
+These power the Questions, Answers, and Replies feature. All require `Authorization: Bearer <access_token>` for write operations. Read operations work for any authenticated user.
+
+**Quick mental model**:
+- A **Question** is a post with content + 1 to 3 specializations.
+- A Question can have unlimited **Answers** (top-level).
+- Each Answer can have unlimited **Replies**.
+- Replies cannot have their own replies (depth limit = 1).
+- Only the asker can mark their question resolved/unresolved.
+- Only authors can edit or delete their own questions/answers/replies.
+
+---
+
+### 13. List Questions
+`GET /api/questions/`
+
+Paginated newest-first list of questions.
+
+**Query params (all optional):**
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `author` | UUID | Show only questions by this user |
+| `specialization` | UUID | Show only questions tagged with this spec (matches even if the question has other specs too) |
+| `is_resolved` | `true` / `false` | Filter by resolved status |
+| `q` | string | Search question content (case-insensitive substring) |
+| `page` | integer | Pagination (default 20 per page) |
+
+**Response (200):**
+```json
+{
+  "count": 47,
+  "next": "https://.../api/questions/?page=2",
+  "previous": null,
+  "results": [
+    {
+      "id": "uuid",
+      "author": {
+        "id": "uuid",
+        "username": "johndoe123",
+        "profile_image_url": "https://.../profile.jpg"
+      },
+      "content_preview": "How do I deploy a Django app to Azure with Postgres? I'm running into...",
+      "specializations": [
+        { "id": "uuid", "name": "Backend" },
+        { "id": "uuid", "name": "DevOps" }
+      ],
+      "is_resolved": false,
+      "answers_count": 12,
+      "created_at": "2026-04-28T12:00:00Z"
+    }
+  ]
+}
+```
+
+`content_preview` is the first 120 chars of the question content. Get the full content from the detail endpoint.
+
+`answers_count` is the **total** of top-level answers and replies combined (Facebook-style "12 comments").
+
+---
+
+### 14. Create a Question
+`POST /api/questions/`
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `content` | `string` | yes | 1–5000 chars, not whitespace-only |
+| `specializations` | `string[] (UUIDs)` | yes | 1 to 3 specialization UUIDs |
+| `is_resolved` | `boolean` | no | defaults to `false` |
+
+```json
+{
+  "content": "How do I deploy a Django app to Azure with Postgres?",
+  "specializations": ["uuid-of-backend", "uuid-of-devops"]
+}
+```
+
+**Response (201):** Returns the **full detail shape** (same as `GET /api/questions/{id}/` below) so you don't need a follow-up GET to render the new question.
+
+**Possible errors (400):**
+
+| Scenario | Error key | Example message |
+|----------|-----------|-----------------|
+| No specs | `specializations` | `"At least one specialization is required."` |
+| More than 3 specs | `specializations` | `"A question can have at most 3 specializations."` |
+| Unknown spec UUID | `specializations` | `"Invalid pk \"...\" - object does not exist."` |
+| Empty content | `content` | `"Content cannot be empty."` |
+| Content too long | `content` | `"Ensure this field has no more than 5000 characters."` |
+
+**Errors (401):** No or invalid token.
+
+---
+
+### 15. Get a Question (with embedded answers)
+`GET /api/questions/{id}/`
+
+Returns the question plus its **first 10 top-level answers**, each with the **first 2 replies inline**. For more, use the dedicated answer / reply list endpoints below.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "author": {
+    "id": "uuid",
+    "username": "johndoe123",
+    "profile_image_url": "https://.../profile.jpg"
+  },
+  "content": "Full question text here...",
+  "specializations": [
+    { "id": "uuid", "name": "Backend" }
+  ],
+  "is_resolved": false,
+  "resolved_at": null,
+  "answers_count": 12,
+  "answers": [
+    {
+      "id": "uuid",
+      "question": "uuid",
+      "author": { "id": "uuid", "username": "...", "profile_image_url": null },
+      "content": "Answer body...",
+      "parent_answer": null,
+      "replies_count": 3,
+      "replies": [
+        {
+          "id": "uuid",
+          "question": "uuid",
+          "author": { "id": "uuid", "username": "...", "profile_image_url": null },
+          "content": "Reply body...",
+          "parent_answer": "uuid-of-the-answer-above",
+          "replies_count": 0,
+          "created_at": "2026-04-28T13:00:00Z",
+          "updated_at": "2026-04-28T13:00:00Z"
+        }
+      ],
+      "created_at": "2026-04-28T12:30:00Z",
+      "updated_at": "2026-04-28T12:30:00Z"
+    }
+  ],
+  "created_at": "2026-04-28T12:00:00Z",
+  "updated_at": "2026-04-28T12:00:00Z"
+}
+```
+
+**Important**: each top-level answer has both `replies_count` (total) and `replies` (first 2 only). If `replies_count > replies.length`, fetch the rest from `GET /api/answers/{id}/replies/`.
+
+**Errors (404):** Question does not exist.
+
+---
+
+### 16. Update a Question
+`PATCH /api/questions/{id}/`
+
+Author only. Returns the same detail shape as the GET above.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `content` | `string` | no | 1–5000 chars |
+| `specializations` | `string[]` | no | If present, still 1–3 UUIDs |
+| `is_resolved` | `boolean` | no | (Prefer the dedicated `/resolve/` endpoint below for clarity) |
+
+**Errors:**
+- `400` — same validation rules as create.
+- `403` — request user is not the question's author.
+- `404` — question does not exist.
+
+---
+
+### 17. Delete a Question
+`DELETE /api/questions/{id}/`
+
+Author only. **Cascades** — deleting a question also deletes all its answers and replies.
+
+**Response (204):** No content.
+
+**Errors:**
+- `403` — not the author.
+- `404` — does not exist.
+
+---
+
+### 18. Mark Question Resolved
+`POST /api/questions/{id}/resolve/`
+
+Asker only. Idempotent — calling on an already-resolved question is a no-op `200`. No request body.
+
+**Response (200):** Full question detail shape with `is_resolved: true` and `resolved_at` set.
+
+**Errors:**
+- `403` — not the asker.
+- `404` — does not exist.
+
+---
+
+### 19. Mark Question Unresolved
+`POST /api/questions/{id}/unresolve/`
+
+Asker only. Idempotent. No request body. For when the asker realizes the question still needs more discussion.
+
+**Response (200):** Full question detail shape with `is_resolved: false` and `resolved_at: null`.
+
+**Errors:**
+- `403` — not the asker.
+- `404` — does not exist.
+
+---
+
+### 20. List Top-Level Answers
+`GET /api/questions/{question_id}/answers/`
+
+Paginated list of **top-level** answers under a question (replies are NOT included here).
+
+**Response (200):**
+```json
+{
+  "count": 12,
+  "next": "https://.../api/questions/<uuid>/answers/?page=2",
+  "previous": null,
+  "results": [
+    {
+      "id": "uuid",
+      "question": "uuid-of-question",
+      "author": { "id": "uuid", "username": "...", "profile_image_url": "..." },
+      "content": "Answer body...",
+      "parent_answer": null,
+      "replies_count": 3,
+      "created_at": "2026-04-28T12:30:00Z",
+      "updated_at": "2026-04-28T12:30:00Z"
+    }
+  ]
+}
+```
+
+Note: `parent_answer` is `null` here because this endpoint only returns top-level answers. To fetch replies under a specific answer, use endpoint 23 below.
+
+**Errors (404):** Question does not exist.
+
+---
+
+### 21. Post an Answer to a Question
+`POST /api/questions/{question_id}/answers/`
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `content` | `string` | yes | 1–5000 chars, not whitespace-only |
+
+```json
+{ "content": "You should use Azure App Service with Postgres Flexible Server..." }
+```
+
+**Response (201):** The created answer in the same shape as the list response above. `replies_count` will be `0`.
+
+**Errors:**
+- `400` — empty or too-long content.
+- `401` — no token.
+- `404` — question does not exist.
+
+---
+
+### 22. Get / Update / Delete a Single Answer or Reply
+`GET / PATCH / DELETE /api/answers/{id}/`
+
+Same view handles top-level answers and replies (both are stored as `Answer` rows). The `parent_answer` field tells you which: `null` = top-level, UUID = reply.
+
+**GET (any user):**
+```json
+{
+  "id": "uuid",
+  "question": "uuid",
+  "author": { ... },
+  "content": "...",
+  "parent_answer": null,
+  "replies_count": 3,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+**PATCH (author only):** Only `content` may be edited.
+
+```json
+{ "content": "Edited answer body" }
+```
+
+**DELETE (author only):** **Cascades** — deleting a top-level answer deletes all its replies.
+
+**Errors:**
+- `400` — empty content on PATCH.
+- `403` — not the author (PATCH or DELETE).
+- `404` — does not exist.
+
+---
+
+### 23. List Replies under an Answer
+`GET /api/answers/{id}/replies/`
+
+Paginated list of replies under a specific top-level answer.
+
+**Response (200):**
+```json
+{
+  "count": 3,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": "uuid",
+      "question": "uuid-of-the-parent-question",
+      "author": { "id": "uuid", "username": "...", "profile_image_url": null },
+      "content": "Reply body...",
+      "parent_answer": "uuid-of-the-parent-answer",
+      "replies_count": 0,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+`replies_count` on a reply is always `0` because of the depth-1 limit.
+
+**Errors (404):** Answer does not exist.
+
+---
+
+### 24. Post a Reply to an Answer
+`POST /api/answers/{id}/replies/`
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `content` | `string` | yes | 1–5000 chars, not whitespace-only |
+
+```json
+{ "content": "Or AWS Elastic Beanstalk works too." }
+```
+
+**Response (201):** The created reply with `parent_answer` set to the URL's answer ID.
+
+**Important**: replies cannot have replies. If you POST to `/api/answers/<id>/replies/` where `<id>` is itself a reply, you get `400` with the message `"Replies cannot have replies — depth limit is 1."`
+
+**Errors:**
+- `400` — empty content, OR trying to reply to a reply (depth-1 enforcement).
+- `401` — no token.
+- `404` — parent answer does not exist.
+
+---
+
 ## Error Format
 
 All validation errors come back as **400** with field-level messages:
@@ -445,6 +792,20 @@ Auth errors on protected endpoints return **401**:
 | 12 | GET | `/api/users/me/specializations/` | Yes | My specializations |
 | 12 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
 | 12 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
+| 13 | GET | `/api/questions/` | Read-only OK | List questions (paginated) |
+| 14 | POST | `/api/questions/` | Yes | Create a question |
+| 15 | GET | `/api/questions/{id}/` | Read-only OK | Question detail + 10 answers + 2 replies each |
+| 16 | PATCH | `/api/questions/{id}/` | Yes (author) | Update a question |
+| 17 | DELETE | `/api/questions/{id}/` | Yes (author) | Delete a question (cascades) |
+| 18 | POST | `/api/questions/{id}/resolve/` | Yes (asker) | Mark question resolved |
+| 19 | POST | `/api/questions/{id}/unresolve/` | Yes (asker) | Mark question unresolved |
+| 20 | GET | `/api/questions/{id}/answers/` | Read-only OK | List top-level answers |
+| 21 | POST | `/api/questions/{id}/answers/` | Yes | Post an answer |
+| 22 | GET | `/api/answers/{id}/` | Read-only OK | Get single answer / reply |
+| 22 | PATCH | `/api/answers/{id}/` | Yes (author) | Update an answer / reply |
+| 22 | DELETE | `/api/answers/{id}/` | Yes (author) | Delete an answer / reply (cascades) |
+| 23 | GET | `/api/answers/{id}/replies/` | Read-only OK | List replies under an answer |
+| 24 | POST | `/api/answers/{id}/replies/` | Yes | Post a reply (depth-1 only) |
 
 ---
 
@@ -473,3 +834,122 @@ All fields are optional - send only what you want to update:
 1. `POST /api/auth/register/` => send JSON, get OTP email
 2. `POST /api/auth/verify-email/` => send OTP, get `access_token`
 3. `PATCH /api/users/me/` => upload profile image with the token
+
+---
+
+### Q&A Integration Notes (for the Flutter team)
+
+A few semantics worth knowing before you start wiring screens.
+
+#### Mental model
+
+```
+Question (a post)
+├── Answer (top-level, parent_answer = null)
+│   ├── Reply (parent_answer = <answer.id>)
+│   └── Reply
+└── Answer (top-level)
+    └── Reply
+```
+
+- Top-level answers and replies are **the same model** server-side. The discriminator is `parent_answer`: `null` means top-level, a UUID means it's a reply.
+- Replies cannot have replies. The server rejects depth-2 posts with `400`.
+
+#### `answers_count` on a Question
+
+It's the **total** count of all answers under the question — top-level answers plus replies, combined. Same shape as Facebook's "12 comments" badge. If a question has 3 top-level answers and each has 2 replies, `answers_count` is `9`.
+
+#### `replies_count` on an Answer
+
+Per-answer count of replies under that specific answer. For top-level answers it can be any non-negative number. For replies it's always `0` (depth-1 cap).
+
+#### Two independent UI checks
+
+These are different things — don't conflate them:
+
+```dart
+// Is this a reply or a top-level answer?
+final isTopLevel = answer.parent_answer == null;
+
+// Does this answer have nested replies the user can expand?
+final hasReplies = answer.replies_count > 0;
+```
+
+A top-level answer with zero replies is normal — show a "Reply" button on it, just no expander.
+
+#### Loading more answers / replies
+
+The question detail endpoint returns the **first 10 top-level answers**, each with the **first 2 replies** inline. To load more:
+
+| To get | Call |
+|---|---|
+| Top-level answers 11+ | `GET /api/questions/<question_id>/answers/?page=2` |
+| Replies 3+ under a specific answer | `GET /api/answers/<answer_id>/replies/?page=1` |
+
+All paginated endpoints return the standard envelope:
+
+```json
+{
+  "count": 47,
+  "next": "https://.../?page=2",
+  "previous": null,
+  "results": [...]
+}
+```
+
+Walk `next` URLs until they're `null`.
+
+#### Permission boundaries
+
+| Action | Who can do it |
+|---|---|
+| Read any question / answer / reply | Anyone authenticated |
+| Create question / answer / reply | Anyone authenticated |
+| Edit question / answer / reply | The original author only |
+| Delete question / answer / reply | The original author only |
+| Resolve / unresolve a question | The question's asker only |
+
+The server enforces all of these. A non-author trying to PATCH gets `403 Forbidden`. Show or hide the edit/delete buttons on the client based on `answer.author.id == current_user.id`, but trust the server to be the final word.
+
+#### Cascade deletes
+
+- Deleting a question deletes all its answers and replies.
+- Deleting a top-level answer deletes all its replies.
+- Deleting a reply just removes that one row.
+
+Show a confirmation dialog before destructive operations — there's no undo.
+
+#### Recommended end-to-end flow
+
+```
+1. POST /api/questions/                      → create a question
+2. (Other user)
+   POST /api/questions/<id>/answers/         → post a top-level answer
+3. (Asker or anyone)
+   POST /api/answers/<id>/replies/           → reply to that answer
+4. (Asker only)
+   POST /api/questions/<id>/resolve/         → mark resolved when satisfied
+5. (Optional)
+   POST /api/questions/<id>/unresolve/       → if more discussion needed
+```
+
+#### Fields server-side fills in (don't send these in request bodies)
+
+For both questions and answers:
+- `id` → server generates a UUID.
+- `author` → server sets to `request.user`.
+- `created_at`, `updated_at` → automatic.
+
+For answers/replies specifically:
+- `question` → server pulls from URL kwarg.
+- `parent_answer` → server sets to `null` for top-level answers, to the parent's UUID for replies.
+
+If you accidentally send these fields in the request body, the server ignores them. They're not honored from client input.
+
+#### Self-answer is allowed
+
+A user can answer their own question. Use case: "I figured it out myself, here's what worked." Useful for future searchers.
+
+#### Anyone can reply to anyone
+
+Replies aren't restricted to the question's author. Any authenticated user can reply to any answer to start a multi-party discussion. UI-wise, treat it like a forum thread.

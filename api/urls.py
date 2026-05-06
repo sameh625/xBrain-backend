@@ -1,5 +1,15 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
+from drf_spectacular.utils import extend_schema, extend_schema_view
+
+TaggedTokenRefreshView = extend_schema_view(
+    post=extend_schema(
+        tags=['Auth'],
+        operation_id='auth_08_token_refresh',
+        summary='Refresh JWT tokens',
+        description='Exchanges a refresh token for a new access + refresh token pair. The old refresh token is blacklisted.',
+    )
+)(TokenRefreshView)
 
 from .views import (
     RegisterView,
@@ -28,7 +38,7 @@ urlpatterns = [
     path('auth/verify-email/', VerifyEmailView.as_view(), name='verify-email'),
     path('auth/login/', LoginView.as_view(), name='login'),
     path('auth/resend-otp/', ResendOTPView.as_view(), name='resend-otp'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+    path('auth/token/refresh/', TaggedTokenRefreshView.as_view(), name='token-refresh'),
     path('auth/forgot-password/', ForgotPasswordView.as_view(), name='forgot-password'),
     path('auth/verify-reset-otp/', VerifyResetOTPView.as_view(), name='verify-reset-otp'),
     path('auth/reset-password/', ResetPasswordView.as_view(), name='reset-password'),

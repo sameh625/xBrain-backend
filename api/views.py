@@ -39,6 +39,8 @@ class RegisterView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_01_register',
         summary="Register a new user",
         description="Creates a pending registration and sends a 6-digit OTP to the provided email.",
         request=UserRegistrationSerializer,
@@ -67,6 +69,8 @@ class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_02_verify_email',
         summary="Verify email with OTP",
         description="Verifies the 6-digit OTP sent to the user's email. On success, creates the user account and returns JWT tokens along with the user profile.",
         request=VerifyOTPSerializer,
@@ -104,6 +108,8 @@ class LoginView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_04_login',
         summary="Login user",
         description="Authenticates a user via email or username and password. Returns JWT tokens and the user profile. Implements account lockout after 5 failed attempts.",
         request=UserLoginSerializer,
@@ -141,6 +147,8 @@ class ResendOTPView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_03_resend_otp',
         summary="Resend registration OTP",
         description="Resends the 6-digit OTP to the email of a pending registration. Subject to a 60-second cooldown and a maximum of 3 attempts.",
         request=ResendOTPSerializer,
@@ -170,6 +178,8 @@ class UserProfileView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(
+        tags=['Users'],
+        operation_id='users_01_me_get',
         summary="Get current user profile",
         description="Returns the profile details of the authenticated user, including their specializations and wallet balance.",
         responses={200: UserDetailSerializer}
@@ -179,6 +189,8 @@ class UserProfileView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @extend_schema(
+        tags=['Users'],
+        operation_id='users_02_me_update',
         summary="Update current user profile",
         description=(
             "Updates the authenticated user's profile fields. All fields are optional — "
@@ -207,6 +219,8 @@ class SpecializationListView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
+        tags=['Specializations'],
+        operation_id='specializations_01_list',
         summary="List all specializations",
         description="Returns a list of all available specializations in the system.",
         responses={
@@ -239,6 +253,8 @@ class UserSpecializationView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
+        tags=['Users'],
+        operation_id='users_03_my_specializations_get',
         summary="Get user's specializations",
         description="Returns the specializations currently selected by the authenticated user, along with the timestamp of when they completed the selection form.",
         responses={200: OpenApiResponse(description="User's specializations and form completion status")}
@@ -257,6 +273,8 @@ class UserSpecializationView(APIView):
         )
 
     @extend_schema(
+        tags=['Users'],
+        operation_id='users_04_my_specializations_set',
         summary="Set user's specializations",
         description="Overwrites the user's current specializations with the provided list of specialization UUIDs. Also marks the specialization form as completed.",
         request=UserSpecializationSerializer,
@@ -298,6 +316,8 @@ class UserSpecializationView(APIView):
         )
 
     @extend_schema(
+        tags=['Users'],
+        operation_id='users_05_my_specializations_skip',
         summary="Skip specialization selection",
         description="Allows the user to skip selecting specializations. Marks the specialization form as completed but assigns no specializations.",
         request=UserSpecializationSerializer,
@@ -337,6 +357,8 @@ class ForgotPasswordView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_05_forgot_password',
         summary="Send password reset OTP",
         description="Generates a 6-digit OTP and sends it to the given user's email address.",
         request=ForgotPasswordSerializer,
@@ -357,6 +379,8 @@ class VerifyResetOTPView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_06_verify_reset_otp',
         summary="Verify password reset OTP",
         description="Validates the OTP sent to the user's email. Returns a secure 15-minute `reset_token` that must be used in the final reset password step.",
         request=VerifyResetOTPSerializer,
@@ -376,6 +400,8 @@ class ResetPasswordView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_07_reset_password',
         summary="Reset password",
         description="Sets a new password for the user, using the `reset_token` obtained from the OTP verification step.",
         request=ResetPasswordSerializer,
@@ -453,6 +479,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_01_questions_list',
         summary="List questions",
         description="Paginated newest-first list of questions. Filters: ?author=, ?specialization=, ?is_resolved=, ?q=.",
         responses={200: QuestionListSerializer(many=True)},
@@ -462,6 +489,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_02_question_create',
         summary="Create a question",
         description="Authenticated users only. Requires content (1–5000 chars) and 1–3 specialization UUIDs.",
         request=QuestionCreateUpdateSerializer,
@@ -486,6 +514,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
 class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
     """GET / PATCH / DELETE /api/questions/{id}/."""
     permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrReadOnly]
+    http_method_names = ['get', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         return _question_queryset_with_counts()
@@ -505,19 +534,28 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance = self.get_queryset().get(pk=instance.pk)
         return Response(QuestionDetailSerializer(instance, context={'request': request}).data)
 
-    @extend_schema(tags=['Q&A'], summary="Get a question with its first 10 answers (and 2 replies each).")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_03_question_detail',
+        summary="Get a question with its first 10 answers (and 2 replies each).",
+    )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_04_question_update',
         summary="Update a question (author only)",
         request=QuestionCreateUpdateSerializer,
     )
     def patch(self, request, *args, **kwargs):
         return super().patch(request, *args, **kwargs)
 
-    @extend_schema(tags=['Q&A'], summary="Delete a question (author only). Cascades to answers and replies.")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_05_question_delete',
+        summary="Delete a question (author only). Cascades to answers and replies.",
+    )
     def delete(self, request, *args, **kwargs):
         return super().delete(request, *args, **kwargs)
 
@@ -528,6 +566,7 @@ class QuestionResolveView(APIView):
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_06_question_resolve',
         summary="Mark a question as resolved (asker only). Idempotent.",
         responses={
             200: QuestionDetailSerializer,
@@ -559,6 +598,7 @@ class QuestionUnresolveView(APIView):
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_07_question_unresolve',
         summary="Mark a resolved question as unresolved (asker only). Idempotent.",
         responses={
             200: QuestionDetailSerializer,
@@ -619,12 +659,17 @@ class AnswerListCreateView(generics.ListCreateAPIView):
             status=status.HTTP_201_CREATED,
         )
 
-    @extend_schema(tags=['Q&A'], summary="List top-level answers for a question.")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_08_answers_list',
+        summary="List top-level answers for a question.",
+    )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_09_answer_create',
         summary="Post a top-level answer to a question.",
         request=AnswerCreateSerializer,
         responses={201: AnswerSerializer, 401: OpenApiResponse(description="Authentication required."), 404: OpenApiResponse(description="Question not found.")},
@@ -635,6 +680,7 @@ class AnswerListCreateView(generics.ListCreateAPIView):
 class AnswerDetailView(generics.RetrieveUpdateDestroyAPIView):
     """GET / PATCH / DELETE /api/answers/{id}/ — works for both top-level answers and replies."""
     permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrReadOnly]
+    http_method_names = ['get', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         return _answer_queryset_with_counts()
@@ -653,19 +699,28 @@ class AnswerDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance = self.get_queryset().get(pk=instance.pk)
         return Response(AnswerSerializer(instance, context={'request': request}).data)
 
-    @extend_schema(tags=['Q&A'], summary="Get a single answer or reply.")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_10_answer_detail',
+        summary="Get a single answer or reply.",
+    )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_11_answer_update',
         summary="Update an answer or reply (author only). Only content can be edited.",
         request=AnswerUpdateSerializer,
     )
     def patch(self, request, *args, **kwargs):
         return super().patch(request, *args, **kwargs)
 
-    @extend_schema(tags=['Q&A'], summary="Delete an answer or reply (author only). Deleting a top-level answer cascades to replies.")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_12_answer_delete',
+        summary="Delete an answer or reply (author only). Deleting a top-level answer cascades to replies.",
+    )
     def delete(self, request, *args, **kwargs):
         return super().delete(request, *args, **kwargs)
 
@@ -710,12 +765,17 @@ class ReplyListCreateView(generics.ListCreateAPIView):
             status=status.HTTP_201_CREATED,
         )
 
-    @extend_schema(tags=['Q&A'], summary="List replies under a specific answer.")
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_13_replies_list',
+        summary="List replies under a specific answer.",
+    )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
     @extend_schema(
         tags=['Q&A'],
+        operation_id='qa_14_reply_create',
         summary="Post a reply to a specific answer.",
         description="The parent must be a top-level answer (depth-1 threading). Replying to a reply returns 400.",
         request=AnswerCreateSerializer,

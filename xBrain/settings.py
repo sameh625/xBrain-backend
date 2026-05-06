@@ -224,6 +224,12 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
+    'TAGS': [
+        {'name': 'Auth', 'description': 'Registration, login, password reset, token management.'},
+        {'name': 'Users', 'description': 'Current user profile and specializations.'},
+        {'name': 'Specializations', 'description': 'Predefined areas of expertise.'},
+        {'name': 'Q&A', 'description': 'Questions, answers, and replies.'},
+    ],
 }
 
 

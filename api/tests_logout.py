@@ -88,10 +88,83 @@ class LogoutTests(TestCase):
         )
         self.assertEqual(first.status_code, status.HTTP_205_RESET_CONTENT)
 
-        # Second logout with the same (now blacklisted) token → 400
+        # Second logout with the same (now blacklisted) refresh token → still 205
+        # because the access token used in the second call (a fresh one from setUp's
+        # for_user, since the first logout blacklisted the original access token's jti)
+        # has already been blacklisted. Actually — we re-use the same access token,
+        # so the *second* request fails at auth time before reaching the view.
+        # Confirms the access-token blacklist works.
         second = self.client.post(
             reverse('api:logout'),
             {'refresh': self.refresh_token},
             format='json',
         )
-        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        # After first logout, the access token is blacklisted → auth fails → 401
+        self.assertEqual(second.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_access_token_rejected_after_logout(self):
+        """The user's original access token must stop working immediately
+        after they call /api/auth/logout/, not just after it expires naturally."""
+        # Sanity: access token works before logout.
+        before = self.client.get(reverse('api:user-profile'))
+        self.assertEqual(before.status_code, status.HTTP_200_OK)
+
+        # Logout
+        logout_res = self.client.post(
+            reverse('api:logout'),
+            {'refresh': self.refresh_token},
+            format='json',
+        )
+        self.assertEqual(logout_res.status_code, status.HTTP_205_RESET_CONTENT)
+
+        # Same access token — should now be rejected.
+        after = self.client.get(reverse('api:user-profile'))
+        self.assertEqual(after.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_other_endpoints_also_reject_blacklisted_access_token(self):
+        """Confirm the access-token blacklist is enforced on every endpoint,
+        not just /api/users/me/."""
+        # Logout
+        self.client.post(
+            reverse('api:logout'),
+            {'refresh': self.refresh_token},
+            format='json',
+        )
+
+        # Try a few different protected endpoints — all should 401.
+        for url in [
+            reverse('api:user-profile'),
+            reverse('api:specializations'),
+            reverse('api:user-specializations'),
+        ]:
+            res = self.client.get(url)
+            self.assertEqual(
+                res.status_code,
+                status.HTTP_401_UNAUTHORIZED,
+                f'{url} should be 401 after logout but got {res.status_code}',
+            )
+
+    def test_fresh_login_after_logout_works(self):
+        """After logging out, the user must be able to log in again
+        and the new tokens must work."""
+        # Logout first
+        self.client.post(
+            reverse('api:logout'),
+            {'refresh': self.refresh_token},
+            format='json',
+        )
+
+        # Login again — get fresh tokens
+        self.client.credentials()  # clear stale auth
+        res = self.client.post(
+            reverse('api:login'),
+            {'identifier': self.user.email, 'password': 'LogoutPass123!'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        new_access = res.data['access_token']
+
+        # Use the new access token — it should work.
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {new_access}')
+        profile = self.client.get(reverse('api:user-profile'))
+        self.assertEqual(profile.status_code, status.HTTP_200_OK)

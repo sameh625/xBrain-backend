@@ -419,17 +419,25 @@ class ResetPasswordView(APIView):
 
 
 class LogoutView(APIView):
-    """POST /api/auth/logout/ — blacklists the provided refresh token."""
+    """POST /api/auth/logout/ — blacklists both the refresh token and the
+    current access token immediately.
+
+    The refresh token goes to SimpleJWT's database-backed blacklist (same as
+    Item 5's original behavior). The access token's `jti` is added to a
+    Redis-backed blacklist with TTL equal to the access token's remaining
+    lifetime — `BlacklistAwareJWTAuthentication` checks this on every
+    authenticated request, so further calls with the same access token
+    return 401 immediately."""
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
         tags=['Auth'],
         operation_id='auth_09_logout',
-        summary='Logout (blacklist refresh token)',
+        summary='Logout (blacklist refresh + access tokens)',
         description=(
-            "Blacklists the provided refresh token so it cannot be used to obtain "
-            "new access tokens. The Flutter client should also clear both tokens "
-            "from secure storage."
+            "Blacklists the provided refresh token AND the access token used to "
+            "make this request, so neither can be reused. The Flutter client "
+            "should also clear both tokens from secure storage."
         ),
         request={
             'application/json': {
@@ -439,7 +447,7 @@ class LogoutView(APIView):
             }
         },
         responses={
-            205: OpenApiResponse(description='Logged out successfully (refresh token blacklisted).'),
+            205: OpenApiResponse(description='Logged out successfully (both tokens blacklisted).'),
             400: OpenApiResponse(description='Missing or invalid refresh token.'),
             401: OpenApiResponse(description='Authentication required.'),
         },
@@ -458,6 +466,21 @@ class LogoutView(APIView):
                 {'refresh': ['Invalid or expired refresh token.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Also blacklist the current access token so it stops working
+        # immediately, instead of remaining valid until it expires naturally.
+        from django.core.cache import cache
+        from .authentication import access_blacklist_key
+        import time
+        access = request.auth
+        if access is not None:
+            jti = access.get('jti')
+            exp = access.get('exp')
+            if jti and exp:
+                ttl = max(0, int(exp - time.time()))
+                if ttl > 0:
+                    cache.set(access_blacklist_key(jti), '1', timeout=ttl)
+
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 

@@ -195,7 +195,9 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # Wraps SimpleJWT's auth with a Redis-backed access-token blacklist
+        # so logout takes effect immediately (not just at access-token expiry).
+        'api.authentication.BlacklistAwareJWTAuthentication',
     ],
     
     'DEFAULT_PERMISSION_CLASSES': [

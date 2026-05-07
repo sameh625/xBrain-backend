@@ -7,10 +7,13 @@ from rest_framework.exceptions import ValidationError as DRFValidationError, Per
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, Q, OuterRef, Subquery, CharField
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+
+from .authentication import access_blacklist_key
 
 from .serializers import (
     UserRegistrationSerializer,
@@ -468,6 +471,18 @@ class LogoutView(APIView):
                 {'refresh': ['Invalid or expired refresh token.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Also blacklist the *access* token used for this request so it
+        # can't be reused until it would have naturally expired.
+        access = request.auth
+        if access is not None:
+            jti = access.get('jti')
+            exp = access.get('exp')
+            if jti and exp:
+                ttl = int(exp - timezone.now().timestamp())
+                if ttl > 0:
+                    cache.set(access_blacklist_key(jti), '1', timeout=ttl)
+
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 

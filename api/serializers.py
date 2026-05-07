@@ -560,6 +560,17 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
         return TopLevelAnswerWithRepliesSerializer(top_level, many=True, context=self.context).data
 
 
+@extend_schema_field({'type': 'string', 'format': 'binary'})
+class BinaryFileField(serializers.FileField):
+    """A FileField that renders as `format: binary` in the OpenAPI schema.
+
+    drf-spectacular's default for ListField(child=FileField()) emits
+    `array<string>`, which makes Swagger UI send a literal "string" placeholder
+    when no file is chosen. Annotating the child field as binary fixes
+    that — Swagger renders a real multi-file picker."""
+    pass
+
+
 def _attach_files_to(parent, files):
     """Validate and persist a list of uploaded files as Attachment rows
     associated with the given parent (Question / Answer / Post). Caller is
@@ -591,7 +602,7 @@ class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
         required=True,
     )
     attachments = serializers.ListField(
-        child=serializers.FileField(),
+        child=BinaryFileField(),
         required=False,
         write_only=True,
         max_length=MAX_ATTACHMENTS_PER_PARENT,
@@ -643,7 +654,7 @@ class AnswerCreateSerializer(serializers.ModelSerializer):
     The parent question, parent answer (for replies), and author are filled in
     by the view based on the URL and the authenticated request."""
     attachments = serializers.ListField(
-        child=serializers.FileField(),
+        child=BinaryFileField(),
         required=False,
         write_only=True,
         max_length=MAX_ATTACHMENTS_PER_PARENT,

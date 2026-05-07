@@ -237,6 +237,15 @@ class AttachmentValidationTests(TestCase):
         self.assertEqual(Attachment.objects.count(), 0)
         self.assertEqual(Question.objects.filter(author=self.user).count(), 0)
 
+    def test_multipart_request_without_attachments_field_succeeds(self):
+        res = self.client.post(
+            reverse('api:questions'),
+            {'content': 'multipart no files', 'specializations': [str(self.spec.id)]},
+            format='multipart',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(res.data['attachments'], [])
+
     def test_plain_json_request_still_works_no_attachments(self):
         # Backwards compat: existing JSON requests with no files keep working.
         res = self.client.post(

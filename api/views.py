@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError, PermissionDenied
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
@@ -417,6 +417,50 @@ class ResetPasswordView(APIView):
             return Response(result, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
+class LogoutView(APIView):
+    """POST /api/auth/logout/ — blacklists the provided refresh token."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Auth'],
+        operation_id='auth_09_logout',
+        summary='Logout (blacklist refresh token)',
+        description=(
+            "Blacklists the provided refresh token so it cannot be used to obtain "
+            "new access tokens. The Flutter client should also clear both tokens "
+            "from secure storage."
+        ),
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {'refresh': {'type': 'string', 'description': 'The refresh token to blacklist.'}},
+                'required': ['refresh'],
+            }
+        },
+        responses={
+            205: OpenApiResponse(description='Logged out successfully (refresh token blacklisted).'),
+            400: OpenApiResponse(description='Missing or invalid refresh token.'),
+            401: OpenApiResponse(description='Authentication required.'),
+        },
+    )
+    def post(self, request):
+        refresh = request.data.get('refresh')
+        if not refresh:
+            return Response(
+                {'refresh': ['This field is required.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            RefreshToken(refresh).blacklist()
+        except Exception:
+            return Response(
+                {'refresh': ['Invalid or expired refresh token.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
 def _question_queryset_with_counts():
     """Annotated queryset used by both list and detail to avoid N+1 on counts.
 
@@ -425,7 +469,7 @@ def _question_queryset_with_counts():
     return (
         Question.objects
         .select_related('author')
-        .prefetch_related('specializations')
+        .prefetch_related('specializations', 'attachments')
         .annotate(
             answers_count=Count('answers', distinct=True),
         )
@@ -435,14 +479,18 @@ def _answer_queryset_with_counts():
     return (
         Answer.objects
         .select_related('author', 'question')
+        .prefetch_related('attachments')
         .annotate(replies_count=Count('replies'))
     )
 
 
 class QuestionListCreateView(generics.ListCreateAPIView):
     """GET /api/questions/ — paginated newest-first list.
-    POST /api/questions/ — create a question (auth required)."""
+    POST /api/questions/ — create a question (auth required). Accepts JSON
+    or multipart/form-data; in the multipart case, optional file `attachments`
+    are stored alongside the question."""
     permission_classes = [IsAuthenticatedOrReadOnly]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -627,8 +675,10 @@ class QuestionUnresolveView(APIView):
 
 class AnswerListCreateView(generics.ListCreateAPIView):
     """GET /api/questions/{question_id}/answers/ — list top-level answers under a question.
-    POST same URL — create a top-level answer."""
+    POST same URL — create a top-level answer. Accepts JSON or multipart/form-data
+    with optional file `attachments`."""
     permission_classes = [IsAuthenticatedOrReadOnly]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -725,10 +775,48 @@ class AnswerDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().delete(request, *args, **kwargs)
 
 
+class AttachmentDeleteView(APIView):
+    """DELETE /api/attachments/{id}/ — author of the parent only.
+
+    The parent is the Question, Answer, or Reply that owns this attachment.
+    Removes both the database row and the file from Azure Blob storage."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_15_attachment_delete',
+        summary="Delete an attachment from a Question, Answer, or Reply (parent author only).",
+        description=(
+            "Removes a single attachment by id. Only the author of the parent "
+            "Question/Answer/Reply may delete its attachments. The underlying "
+            "file is removed from Azure Blob storage as part of this operation."
+        ),
+        responses={
+            204: OpenApiResponse(description="Attachment deleted."),
+            403: OpenApiResponse(description="Only the parent's author may delete its attachments."),
+            404: OpenApiResponse(description="Attachment not found."),
+        },
+        request=None,
+    )
+    def delete(self, request, pk):
+        from .models import Attachment
+        attachment = get_object_or_404(Attachment, pk=pk)
+        parent = attachment.parent
+        if parent is None or getattr(parent, 'author_id', None) != request.user.id:
+            raise PermissionDenied("Only the parent's author can delete this attachment.")
+        # Remove the underlying file from Blob storage, then the row.
+        if attachment.file:
+            attachment.file.delete(save=False)
+        attachment.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class ReplyListCreateView(generics.ListCreateAPIView):
     """GET /api/answers/{id}/replies/ — list replies under a top-level answer.
-    POST same URL — post a reply to that answer (depth-1)."""
+    POST same URL — post a reply to that answer (depth-1). Accepts JSON
+    or multipart/form-data with optional file `attachments`."""
     permission_classes = [IsAuthenticatedOrReadOnly]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_serializer_class(self):
         if self.request.method == 'POST':

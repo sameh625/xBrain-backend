@@ -17,14 +17,69 @@ def store_otp(email, otp, validity_minutes=5):
     return True
 
 
-def verify_otp(email, otp):
+ATTACHMENT_LIMITS = {
+    'image': {
+        'mime_types': ['image/jpeg', 'image/png', 'image/webp'],
+        'max_bytes': 5 * 1024 * 1024,  # 5 MB
+    },
+    'video': {
+        'mime_types': ['video/mp4', 'video/quicktime'],
+        'max_bytes': 50 * 1024 * 1024,  # 50 MB
+    },
+    'audio': {
+        'mime_types': [
+            'audio/mpeg',   # MP3
+            'audio/mp4',    # M4A / AAC (iPhone voice memos)
+            'audio/aac',    # AAC alternate MIME
+            'audio/ogg',    # OGG
+            'audio/webm',   # WebM audio
+        ],
+        'max_bytes': 15 * 1024 * 1024,  # 15 MB ≈ 15-20 min compressed audio
+    },
+    'pdf': {
+        'mime_types': ['application/pdf'],
+        'max_bytes': 10 * 1024 * 1024,  # 10 MB
+    },
+}
+
+MAX_ATTACHMENTS_PER_PARENT = 4
+
+
+def classify_and_validate_attachment(uploaded_file):
+    """Classify an uploaded file by MIME type and validate its size.
+
+    Returns the tuple (kind, mime_type) where kind is one of 'image', 'video',
+    'audio', 'pdf'. Raises rest_framework.exceptions.ValidationError with a
+    user-friendly message if the file is too large or has an unsupported type.
+    """
+    from rest_framework.exceptions import ValidationError as DRFValidationError
+
+    mime = (uploaded_file.content_type or '').lower()
+    for kind, limits in ATTACHMENT_LIMITS.items():
+        if mime in limits['mime_types']:
+            if uploaded_file.size > limits['max_bytes']:
+                max_mb = limits['max_bytes'] // (1024 * 1024)
+                raise DRFValidationError(
+                    f'{kind.capitalize()} too large (max {max_mb} MB).'
+                )
+            return kind, mime
+    raise DRFValidationError(
+        f'Unsupported file type: {mime or "unknown"}. '
+        f'Allowed: image (jpeg/png/webp), video (mp4/quicktime), '
+        f'audio (mpeg/mp4/aac/ogg/webm), pdf.'
+    )
+
+
+def verify_otp(email, otp, consume=True):
+    """Verify the OTP for an email. By default, consumes (deletes) the OTP on success."""
     cache_key = f'otp_{email}'
     stored_otp = cache.get(cache_key)
-    
+
     if stored_otp and stored_otp == otp:
-        cache.delete(cache_key)
+        if consume:
+            cache.delete(cache_key)
         return True
-    
+
     return False
 
 

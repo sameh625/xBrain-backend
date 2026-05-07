@@ -871,3 +871,70 @@ class ProfileUpdateTests(TestCase):
         response = self.client.patch(self.url, {'bio': 'hack'}, format='json')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+
+class PolishFixesTests(TestCase):
+    """Regression tests for the two Sprint-1 bugs fixed in Item 6."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.url = reverse('api:verify-email')
+        self.email = 'polish@example.com'
+        self.registration_data = {
+            'email': self.email,
+            'username': 'polishuser',
+            'password': 'SecurePass123!',
+            'first_name': 'Polish',
+            'last_name': 'User',
+            'phone_number': '+1900000001',
+            'bio': '',
+        }
+
+    def tearDown(self):
+        cache.clear()
+
+    def _setup_pending_registration(self, otp='123456'):
+        cache.set(f'pending_registration_{self.email}', self.registration_data, timeout=600)
+        cache.set(f'otp_{self.email}', otp, timeout=300)
+
+    def test_otp_survives_user_creation_failure(self):
+        """If User.objects.create_user fails after OTP verification,
+        the OTP must NOT be consumed — the user can retry with the same code."""
+        self._setup_pending_registration('123456')
+
+        from unittest.mock import patch
+        with patch('api.models.CustomUserManager.create_user', side_effect=Exception('DB hiccup')):
+            response = self.client.post(self.url, {
+                'email': self.email,
+                'otp': '123456',
+            }, format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertIsNotNone(cache.get(f'otp_{self.email}'))
+        self.assertEqual(cache.get(f'otp_{self.email}'), '123456')
+
+        retry = self.client.post(self.url, {
+            'email': self.email,
+            'otp': '123456',
+        }, format='json')
+        self.assertEqual(retry.status_code, status.HTTP_201_CREATED)
+
+        self.assertIsNone(cache.get(f'otp_{self.email}'))
+
+    def test_welcome_email_failure_does_not_break_verification(self):
+        """If send_welcome_email raises, the user is still created and the
+        endpoint returns 201 — the email is best-effort."""
+        self._setup_pending_registration('654321')
+
+        from unittest.mock import patch
+        with patch('api.utils.send_welcome_email', side_effect=Exception('SMTP down')):
+            response = self.client.post(self.url, {
+                'email': self.email,
+                'otp': '654321',
+            }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('access_token', response.data)
+        self.assertIn('refresh_token', response.data)
+
+        self.assertTrue(User.objects.filter(email=self.email).exists())

@@ -2,6 +2,7 @@ import uuid
 import re
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.contrib.contenttypes.fields import GenericRelation
 from django.core.validators import RegexValidator, MinLengthValidator, MaxLengthValidator, URLValidator
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
@@ -393,6 +394,10 @@ class Question(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Reverse relation to Attachment via the GenericForeignKey on Attachment.
+    # Lets us write Question.objects.prefetch_related('attachments') to avoid N+1.
+    attachments = GenericRelation('Attachment', related_query_name='question')
+
     class Meta:
         db_table = 'questions'
         verbose_name = _('question')
@@ -434,6 +439,8 @@ class Answer(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    attachments = GenericRelation('Attachment', related_query_name='answer')
+
     class Meta:
         db_table = 'answers'
         verbose_name = _('answer')
@@ -451,3 +458,49 @@ class Answer(models.Model):
     def __str__(self):
         kind = "Reply" if self.parent_answer_id else "Answer"
         return f"{kind} by {self.author.username} on Q {self.question_id}"
+
+
+class Attachment(models.Model):
+    """Generic attachment that can hang off a Question, Answer (or reply), or Post.
+
+    Files are uploaded inline as part of creating the parent (multipart/form-data
+    on the parent's POST endpoint). Stored in Azure Blob via Django's storage backend."""
+
+    KIND_CHOICES = [
+        ('image', 'Image'),
+        ('video', 'Video'),
+        ('audio', 'Audio'),
+        ('pdf', 'PDF'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    content_type = models.ForeignKey(
+        'contenttypes.ContentType',
+        on_delete=models.CASCADE,
+    )
+    object_id = models.UUIDField()
+
+    file = models.FileField(upload_to='attachments/%Y/%m/')
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES)
+    mime_type = models.CharField(max_length=100)
+    size_bytes = models.BigIntegerField()
+    original_filename = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'attachments'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['content_type', 'object_id'], name='idx_att_parent'),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} attachment ({self.original_filename})"
+
+    @property
+    def parent(self):
+        """Resolve the polymorphic parent (Question / Answer / Post)."""
+        from django.contrib.contenttypes.models import ContentType
+        ct = self.content_type
+        return ct.get_object_for_this_type(pk=self.object_id)

@@ -2,8 +2,15 @@ from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password as django_validate_password
 from django.core.exceptions import ValidationError
-from .models import User, Specialization, Certificate, PointsWallet, Question, Answer
-from .utils import validate_password_strength, send_otp_and_store, verify_otp, send_reset_otp_and_store
+from .models import User, Specialization, Certificate, PointsWallet, Question, Answer, Attachment
+from .utils import (
+    validate_password_strength,
+    send_otp_and_store,
+    verify_otp,
+    send_reset_otp_and_store,
+    classify_and_validate_attachment,
+    MAX_ATTACHMENTS_PER_PARENT,
+)
 from drf_spectacular.utils import extend_schema_field
 
 class UserRegistrationSerializer(serializers.Serializer):
@@ -82,16 +89,16 @@ class VerifyOTPSerializer(serializers.Serializer):
         email = data['email']
         otp = data['otp']
         
-        if not verify_otp(email, otp):
+        if not verify_otp(email, otp, consume=False):
             raise serializers.ValidationError({"otp": "Invalid or expired OTP code."})
-        
+
         from django.core.cache import cache
         cache_key = f'pending_registration_{email}'
         registration_data = cache.get(cache_key)
-        
+
         if not registration_data:
             raise serializers.ValidationError({"email": "Registration data not found. Please register again."})
-        
+
         try:
             user = User.objects.create_user(
                 email=registration_data['email'],
@@ -102,24 +109,27 @@ class VerifyOTPSerializer(serializers.Serializer):
                 phone_number=registration_data['phone_number'],
                 bio=registration_data.get('bio', ''),
             )
-            
-            cache.delete(cache_key)
-            
-            cache.delete(f'otp_resend_count_{email}')
-            cache.delete(f'otp_last_sent_{email}')
-            
+        except Exception as e:
+            raise serializers.ValidationError({"error": f"Failed to create user: {str(e)}"})
+
+        cache.delete(f'otp_{email}')
+        cache.delete(cache_key)
+        cache.delete(f'otp_resend_count_{email}')
+        cache.delete(f'otp_last_sent_{email}')
+        try:
             from .utils import send_welcome_email
             send_welcome_email(
                 email=user.email,
                 first_name=user.first_name,
-                username=user.username
+                username=user.username,
             )
-            
-            data['user'] = user
-            
-        except Exception as e:
-            raise serializers.ValidationError({"error": f"Failed to create user: {str(e)}"})
-        
+        except Exception as email_err:
+            import logging
+            logging.getLogger(__name__).warning(
+                f'Welcome email failed for {user.email}: {email_err}'
+            )
+
+        data['user'] = user
         return data
 
 
@@ -412,6 +422,24 @@ class ResetPasswordSerializer(serializers.Serializer):
             'message': 'Password reset successfully. You can now log in.'
         }
 
+class AttachmentSerializer(serializers.ModelSerializer):
+    """Read shape for an Attachment. Returned inline as a list under the parent
+    (Question / Answer / Reply / Post). The `url` is an Azure Blob URL."""
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Attachment
+        fields = [
+            'id', 'kind', 'mime_type', 'size_bytes',
+            'original_filename', 'url', 'created_at',
+        ]
+
+    def get_url(self, obj) -> str | None:
+        if obj.file:
+            return obj.file.url
+        return None
+
+
 class PublicAuthorSerializer(serializers.ModelSerializer):
     """Compact public profile used as the nested 'author' on Q&A responses."""
     profile_image_url = serializers.SerializerMethodField()
@@ -443,12 +471,13 @@ class QuestionListSerializer(serializers.ModelSerializer):
     content_preview = serializers.SerializerMethodField()
     specializations = SpecializationCompactSerializer(many=True, read_only=True)
     answers_count = serializers.IntegerField(read_only=True)
+    attachments = AttachmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Question
         fields = [
             'id', 'author', 'content_preview', 'specializations',
-            'is_resolved', 'answers_count', 'created_at',
+            'is_resolved', 'answers_count', 'attachments', 'created_at',
         ]
 
     def get_content_preview(self, obj) -> str:
@@ -464,12 +493,13 @@ class AnswerSerializer(serializers.ModelSerializer):
     question = serializers.PrimaryKeyRelatedField(read_only=True)
     parent_answer = serializers.PrimaryKeyRelatedField(read_only=True)
     replies_count = serializers.IntegerField(read_only=True, default=0)
+    attachments = AttachmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Answer
         fields = [
             'id', 'question', 'author', 'content', 'parent_answer',
-            'replies_count', 'created_at', 'updated_at',
+            'replies_count', 'attachments', 'created_at', 'updated_at',
         ]
 
 
@@ -483,12 +513,13 @@ class TopLevelAnswerWithRepliesSerializer(serializers.ModelSerializer):
     parent_answer = serializers.PrimaryKeyRelatedField(read_only=True)
     replies_count = serializers.IntegerField(read_only=True, default=0)
     replies = serializers.SerializerMethodField()
+    attachments = AttachmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Answer
         fields = [
             'id', 'question', 'author', 'content', 'parent_answer',
-            'replies_count', 'replies', 'created_at', 'updated_at',
+            'replies_count', 'replies', 'attachments', 'created_at', 'updated_at',
         ]
 
     @extend_schema_field(AnswerSerializer(many=True))
@@ -506,13 +537,14 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
     specializations = SpecializationCompactSerializer(many=True, read_only=True)
     answers_count = serializers.IntegerField(read_only=True)
     answers = serializers.SerializerMethodField()
+    attachments = AttachmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Question
         fields = [
             'id', 'author', 'content', 'specializations',
             'is_resolved', 'resolved_at',
-            'answers_count', 'answers',
+            'answers_count', 'answers', 'attachments',
             'created_at', 'updated_at',
         ]
 
@@ -528,21 +560,51 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
         return TopLevelAnswerWithRepliesSerializer(top_level, many=True, context=self.context).data
 
 
+def _attach_files_to(parent, files):
+    """Validate and persist a list of uploaded files as Attachment rows
+    associated with the given parent (Question / Answer / Post). Caller is
+    expected to have already enforced any per-parent count cap."""
+    from django.contrib.contenttypes.models import ContentType
+    ct = ContentType.objects.get_for_model(parent.__class__)
+    for f in files:
+        kind, mime = classify_and_validate_attachment(f)
+        Attachment.objects.create(
+            content_type=ct,
+            object_id=parent.pk,
+            file=f,
+            kind=kind,
+            mime_type=mime,
+            size_bytes=f.size,
+            original_filename=f.name[:255],
+        )
+
+
 class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
     """Write representation for creating or updating a Question.
 
     Accepts the question's content, between one and three specialization UUIDs,
-    and (on update) the resolved flag. The author is set by the view from the
-    authenticated request and is not accepted from the client."""
+    optional file attachments (multipart/form-data only), and (on update) the
+    resolved flag. The author is set by the view from the authenticated request."""
     specializations = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Specialization.objects.all(),
         required=True,
     )
+    attachments = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        write_only=True,
+        max_length=MAX_ATTACHMENTS_PER_PARENT,
+        help_text=(
+            f'Optional list of files (max {MAX_ATTACHMENTS_PER_PARENT}). '
+            'Send via multipart/form-data only. Each file is classified by MIME '
+            'and validated for size: image (5 MB), video (50 MB), audio (15 MB), pdf (10 MB).'
+        ),
+    )
 
     class Meta:
         model = Question
-        fields = ['id', 'content', 'specializations', 'is_resolved']
+        fields = ['id', 'content', 'specializations', 'is_resolved', 'attachments']
         read_only_fields = ['id']
 
     def validate_specializations(self, value):
@@ -557,17 +619,43 @@ class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Content cannot be empty.")
         return value
 
+    def validate_attachments(self, value):
+        for f in value:
+            classify_and_validate_attachment(f)
+        return value
+
+    def create(self, validated_data):
+        files = validated_data.pop('attachments', [])
+        question = super().create(validated_data)
+        if files:
+            _attach_files_to(question, files)
+        return question
+
+    def update(self, instance, validated_data):
+        validated_data.pop('attachments', None)
+        return super().update(instance, validated_data)
+
 
 class AnswerCreateSerializer(serializers.ModelSerializer):
     """Write representation for creating an answer or a reply.
 
-    The client sends only the answer's content. The parent question, parent
-    answer (for replies), and author are filled in by the view based on the
-    URL and the authenticated request."""
+    The client sends only the answer's content (and optionally attachments).
+    The parent question, parent answer (for replies), and author are filled in
+    by the view based on the URL and the authenticated request."""
+    attachments = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        write_only=True,
+        max_length=MAX_ATTACHMENTS_PER_PARENT,
+        help_text=(
+            f'Optional list of files (max {MAX_ATTACHMENTS_PER_PARENT}). '
+            'Send via multipart/form-data only.'
+        ),
+    )
 
     class Meta:
         model = Answer
-        fields = ['id', 'content']
+        fields = ['id', 'content', 'attachments']
         read_only_fields = ['id']
 
     def validate_content(self, value):
@@ -575,12 +663,24 @@ class AnswerCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Content cannot be empty.")
         return value
 
+    def validate_attachments(self, value):
+        for f in value:
+            classify_and_validate_attachment(f)
+        return value
+
+    def create(self, validated_data):
+        files = validated_data.pop('attachments', [])
+        answer = super().create(validated_data)
+        if files:
+            _attach_files_to(answer, files)
+        return answer
+
 
 class AnswerUpdateSerializer(serializers.ModelSerializer):
     """Write representation for editing an existing answer or reply.
 
     Only the answer's content may be changed after creation; the parent
-    question and parent answer are fixed at creation time."""
+    question, parent answer, and attachments are fixed at creation time."""
 
     class Meta:
         model = Answer

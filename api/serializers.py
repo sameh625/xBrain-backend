@@ -2,7 +2,10 @@ from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password as django_validate_password
 from django.core.exceptions import ValidationError
-from .models import User, Specialization, Certificate, PointsWallet, Question, Answer, Attachment
+from .models import (
+    User, Specialization, Certificate, PointsWallet,
+    Question, Answer, Attachment, Post, PostReaction,
+)
 from .utils import (
     validate_password_strength,
     send_otp_and_store,
@@ -713,3 +716,111 @@ class AnswerUpdateSerializer(serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Content cannot be empty.")
         return value
+
+class PostListSerializer(serializers.ModelSerializer):
+    """List representation used by GET /api/posts/.
+
+    Returns a content preview, specializations, attachment + reaction counts,
+    and the viewer's own reaction state if any."""
+    author = PublicAuthorSerializer(read_only=True)
+    content_preview = serializers.SerializerMethodField()
+    specializations = SpecializationCompactSerializer(many=True, read_only=True)
+    attachments = AttachmentSerializer(many=True, read_only=True)
+    likes_count = serializers.IntegerField(read_only=True, default=0)
+    dislikes_count = serializers.IntegerField(read_only=True, default=0)
+    my_reaction = serializers.CharField(read_only=True, allow_null=True, default=None)
+    comments_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Post
+        fields = [
+            'id', 'author', 'content_preview', 'specializations',
+            'attachments',
+            'likes_count', 'dislikes_count', 'my_reaction',
+            'comments_count',
+            'created_at',
+        ]
+
+    def get_content_preview(self, obj) -> str:
+        return obj.content[:120]
+
+
+class PostDetailSerializer(serializers.ModelSerializer):
+    """Detail representation used by GET /api/posts/{id}/.
+
+    Same as the list shape plus the full content (no preview) and
+    `updated_at`. Comments will be embedded inline once Block 2 ships."""
+    author = PublicAuthorSerializer(read_only=True)
+    specializations = SpecializationCompactSerializer(many=True, read_only=True)
+    attachments = AttachmentSerializer(many=True, read_only=True)
+    likes_count = serializers.IntegerField(read_only=True, default=0)
+    dislikes_count = serializers.IntegerField(read_only=True, default=0)
+    my_reaction = serializers.CharField(read_only=True, allow_null=True, default=None)
+    comments_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Post
+        fields = [
+            'id', 'author', 'content', 'specializations',
+            'attachments',
+            'likes_count', 'dislikes_count', 'my_reaction',
+            'comments_count',
+            'created_at', 'updated_at',
+        ]
+
+
+class PostCreateUpdateSerializer(serializers.ModelSerializer):
+    """Write representation for creating or updating a Post.
+
+    Mirrors QuestionCreateUpdateSerializer (no resolved flag). Accepts content,
+    1–3 specializations, and optional attachments via multipart."""
+    specializations = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Specialization.objects.all(),
+        required=True,
+    )
+    attachments = serializers.ListField(
+        child=BinaryFileField(),
+        required=False,
+        write_only=True,
+        max_length=MAX_ATTACHMENTS_PER_PARENT,
+        help_text=(
+            f'Optional list of files (max {MAX_ATTACHMENTS_PER_PARENT}). '
+            'Send via multipart/form-data only. Each file is classified by MIME '
+            'and validated for size: image (5 MB), video (50 MB), audio (15 MB), pdf (10 MB).'
+        ),
+    )
+
+    class Meta:
+        model = Post
+        fields = ['id', 'content', 'specializations', 'attachments']
+        read_only_fields = ['id']
+
+    def validate_specializations(self, value):
+        if len(value) < 1:
+            raise serializers.ValidationError("At least one specialization is required.")
+        if len(value) > 3:
+            raise serializers.ValidationError("A post can have at most 3 specializations.")
+        return value
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value
+
+    def validate_attachments(self, value):
+        real_files = [f for f in value if f is not None]
+        for f in real_files:
+            classify_and_validate_attachment(f)
+        return real_files
+
+    def create(self, validated_data):
+        files = validated_data.pop('attachments', [])
+        post = super().create(validated_data)
+        if files:
+            _attach_files_to(post, files)
+        return post
+
+    def update(self, instance, validated_data):
+        validated_data.pop('attachments', None)
+        return super().update(instance, validated_data)

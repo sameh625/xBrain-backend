@@ -8,7 +8,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.contrib.auth import authenticate
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Q, OuterRef, Subquery, CharField
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -30,8 +30,14 @@ from .serializers import (
     AnswerSerializer,
     AnswerCreateSerializer,
     AnswerUpdateSerializer,
+    PostListSerializer,
+    PostDetailSerializer,
+    PostCreateUpdateSerializer,
 )
-from .models import User, Specialization, UserSpecialization, Question, Answer
+from .models import (
+    User, Specialization, UserSpecialization,
+    Question, Answer, Post, PostReaction,
+)
 from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor
 
 
@@ -419,25 +425,17 @@ class ResetPasswordView(APIView):
 
 
 class LogoutView(APIView):
-    """POST /api/auth/logout/ — blacklists both the refresh token and the
-    current access token immediately.
-
-    The refresh token goes to SimpleJWT's database-backed blacklist (same as
-    Item 5's original behavior). The access token's `jti` is added to a
-    Redis-backed blacklist with TTL equal to the access token's remaining
-    lifetime — `BlacklistAwareJWTAuthentication` checks this on every
-    authenticated request, so further calls with the same access token
-    return 401 immediately."""
+    """POST /api/auth/logout/ — blacklists the provided refresh token."""
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
         tags=['Auth'],
         operation_id='auth_09_logout',
-        summary='Logout (blacklist refresh + access tokens)',
+        summary='Logout (blacklist refresh token)',
         description=(
-            "Blacklists the provided refresh token AND the access token used to "
-            "make this request, so neither can be reused. The Flutter client "
-            "should also clear both tokens from secure storage."
+            "Blacklists the provided refresh token so it cannot be used to obtain "
+            "new access tokens. The Flutter client should also clear both tokens "
+            "from secure storage."
         ),
         request={
             'application/json': {
@@ -447,7 +445,7 @@ class LogoutView(APIView):
             }
         },
         responses={
-            205: OpenApiResponse(description='Logged out successfully (both tokens blacklisted).'),
+            205: OpenApiResponse(description='Logged out successfully (refresh token blacklisted).'),
             400: OpenApiResponse(description='Missing or invalid refresh token.'),
             401: OpenApiResponse(description='Authentication required.'),
         },
@@ -466,21 +464,6 @@ class LogoutView(APIView):
                 {'refresh': ['Invalid or expired refresh token.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        # Also blacklist the current access token so it stops working
-        # immediately, instead of remaining valid until it expires naturally.
-        from django.core.cache import cache
-        from .authentication import access_blacklist_key
-        import time
-        access = request.auth
-        if access is not None:
-            jti = access.get('jti')
-            exp = access.get('exp')
-            if jti and exp:
-                ttl = max(0, int(exp - time.time()))
-                if ttl > 0:
-                    cache.set(access_blacklist_key(jti), '1', timeout=ttl)
-
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 
@@ -827,7 +810,6 @@ class AttachmentDeleteView(APIView):
         parent = attachment.parent
         if parent is None or getattr(parent, 'author_id', None) != request.user.id:
             raise PermissionDenied("Only the parent's author can delete this attachment.")
-        # Remove the underlying file from Blob storage, then the row.
         if attachment.file:
             attachment.file.delete(save=False)
         attachment.delete()
@@ -899,3 +881,217 @@ class ReplyListCreateView(generics.ListCreateAPIView):
     )
     def post(self, request, *args, **kwargs):
         return super().post(request, *args, **kwargs)
+
+def _post_queryset_with_counts(viewer=None):
+    """Annotated Post queryset.
+
+    `likes_count` and `dislikes_count` are computed in SQL (default 0 for new
+    posts with no reactions yet). `my_reaction` is per-viewer — populated only
+    when the viewer is authenticated; otherwise null."""
+    qs = (
+        Post.objects
+        .select_related('author')
+        .prefetch_related('specializations', 'attachments')
+        .annotate(
+            likes_count=Count(
+                'reactions',
+                filter=Q(reactions__reaction='like'),
+                distinct=True,
+            ),
+            dislikes_count=Count(
+                'reactions',
+                filter=Q(reactions__reaction='dislike'),
+                distinct=True,
+            ),
+        )
+    )
+    if viewer is not None and getattr(viewer, 'is_authenticated', False):
+        my = (
+            PostReaction.objects
+            .filter(post=OuterRef('pk'), user=viewer)
+            .values('reaction')[:1]
+        )
+        qs = qs.annotate(my_reaction=Subquery(my, output_field=CharField()))
+    return qs
+
+
+class PostListCreateView(generics.ListCreateAPIView):
+    """GET /api/posts/ — paginated list. POST /api/posts/ — create (auth)."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return PostCreateUpdateSerializer
+        return PostListSerializer
+
+    def get_queryset(self):
+        viewer = self.request.user if self.request.user.is_authenticated else None
+        qs = _post_queryset_with_counts(viewer=viewer).order_by('-created_at')
+        params = self.request.query_params
+
+        author = params.get('author')
+        if author:
+            qs = qs.filter(author_id=author)
+
+        specialization = params.get('specialization')
+        if specialization:
+            qs = qs.filter(specializations__id=specialization).distinct()
+
+        q = params.get('q')
+        if q:
+            qs = qs.filter(content__icontains=q)
+
+        return qs
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_01_list',
+        summary="List posts",
+        description="Paginated newest-first list of posts. Filters: ?author=, ?specialization=, ?q=. Each post carries likes/dislikes counts and (if authenticated) the viewer's `my_reaction`.",
+        responses={200: PostListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_02_create',
+        summary="Create a post",
+        description="Authenticated users only. Requires content (1–5000 chars) and 1–3 specialization UUIDs. Optional file `attachments` via multipart/form-data.",
+        request=PostCreateUpdateSerializer,
+        responses={
+            201: PostDetailSerializer,
+            400: OpenApiResponse(description="Validation error."),
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        post = serializer.save(author=request.user)
+        post = _post_queryset_with_counts(viewer=request.user).get(pk=post.pk)
+        return Response(
+            PostDetailSerializer(post, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/posts/{id}/."""
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrReadOnly]
+    http_method_names = ['get', 'patch', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        viewer = self.request.user if self.request.user.is_authenticated else None
+        return _post_queryset_with_counts(viewer=viewer)
+
+    def get_serializer_class(self):
+        if self.request.method == 'PATCH':
+            return PostCreateUpdateSerializer
+        return PostDetailSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        instance = self.get_queryset().get(pk=instance.pk)
+        return Response(PostDetailSerializer(instance, context={'request': request}).data)
+
+    @extend_schema(tags=['Posts'], operation_id='posts_03_detail', summary="Get a post.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_04_update',
+        summary="Update a post (author only).",
+        request=PostCreateUpdateSerializer,
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_05_delete',
+        summary="Delete a post (author only). Cascades to attachments and reactions.",
+    )
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class _PostReactionToggleView(APIView):
+    """Shared base — concrete subclasses set `target_reaction`."""
+    permission_classes = [IsAuthenticated]
+    target_reaction = None  # 'like' or 'dislike'
+
+    def _toggle(self, request, pk):
+        post = get_object_or_404(Post, pk=pk)
+        with transaction.atomic():
+            existing = (
+                PostReaction.objects
+                .select_for_update()
+                .filter(user=request.user, post=post)
+                .first()
+            )
+            if existing is None:
+                PostReaction.objects.create(
+                    user=request.user, post=post, reaction=self.target_reaction,
+                )
+            elif existing.reaction == self.target_reaction:
+                existing.delete()
+            else:
+                existing.reaction = self.target_reaction
+                existing.save(update_fields=['reaction', 'updated_at'])
+
+        post = _post_queryset_with_counts(viewer=request.user).get(pk=pk)
+        return Response(
+            PostDetailSerializer(post, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class PostLikeView(_PostReactionToggleView):
+    """POST /api/posts/{id}/like/ — toggle like."""
+    target_reaction = 'like'
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_06_post_like',
+        summary="Toggle like on a post.",
+        description=(
+            "If the user has no reaction → adds a like. If already liked → removes "
+            "the like (toggle off). If currently disliked → switches to like. "
+            "Returns the full post detail with updated counts and the viewer's new `my_reaction`."
+        ),
+        request=None,
+        responses={
+            200: PostDetailSerializer,
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Post not found."),
+        },
+    )
+    def post(self, request, pk):
+        return self._toggle(request, pk)
+
+
+class PostDislikeView(_PostReactionToggleView):
+    """POST /api/posts/{id}/dislike/ — toggle dislike."""
+    target_reaction = 'dislike'
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_07_post_dislike',
+        summary="Toggle dislike on a post.",
+        description="Symmetric to like: adds a dislike, toggles off, or switches from like to dislike.",
+        request=None,
+        responses={
+            200: PostDetailSerializer,
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Post not found."),
+        },
+    )
+    def post(self, request, pk):
+        return self._toggle(request, pk)

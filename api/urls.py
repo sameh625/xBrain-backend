@@ -31,6 +31,10 @@ from .views import (
     AnswerDetailView,
     ReplyListCreateView,
     AttachmentDeleteView,
+    PostListCreateView,
+    PostDetailView,
+    PostLikeView,
+    PostDislikeView,
 )
 
 app_name = 'api'
@@ -51,7 +55,6 @@ urlpatterns = [
 
     path('specializations/', SpecializationListView.as_view(), name='specializations'),
 
-    # Q&A (Sprint 2)
     path('questions/', QuestionListCreateView.as_view(), name='questions'),
     path('questions/<uuid:pk>/', QuestionDetailView.as_view(), name='question-detail'),
     path('questions/<uuid:pk>/resolve/', QuestionResolveView.as_view(), name='question-resolve'),
@@ -60,6 +63,10 @@ urlpatterns = [
     path('answers/<uuid:pk>/', AnswerDetailView.as_view(), name='answer-detail'),
     path('answers/<uuid:pk>/replies/', ReplyListCreateView.as_view(), name='answer-replies'),
 
-    # Attachments (Sprint 2 — Item 1b)
     path('attachments/<uuid:pk>/', AttachmentDeleteView.as_view(), name='attachment-delete'),
+
+    path('posts/', PostListCreateView.as_view(), name='posts'),
+    path('posts/<uuid:pk>/', PostDetailView.as_view(), name='post-detail'),
+    path('posts/<uuid:pk>/like/', PostLikeView.as_view(), name='post-like'),
+    path('posts/<uuid:pk>/dislike/', PostDislikeView.as_view(), name='post-dislike'),
 ]

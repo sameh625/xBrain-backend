@@ -231,6 +231,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Users', 'description': 'Current user profile and specializations.'},
         {'name': 'Specializations', 'description': 'Predefined areas of expertise.'},
         {'name': 'Q&A', 'description': 'Questions, answers, and replies.'},
+        {'name': 'Posts', 'description': 'Knowledge-sharing posts with likes, dislikes, and (later) comments.'},
     ],
 }
 

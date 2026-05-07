@@ -504,3 +504,77 @@ class Attachment(models.Model):
         from django.contrib.contenttypes.models import ContentType
         ct = self.content_type
         return ct.get_object_for_this_type(pk=self.object_id)
+
+
+class Post(models.Model):
+    """Knowledge-sharing post. Same shape as Question (no resolve flag),
+    plus a like/dislike reaction system that distinguishes Posts from Q&A."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    author = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='posts',
+    )
+    content = models.TextField(max_length=5000)
+    specializations = models.ManyToManyField(
+        'Specialization',
+        related_name='posts',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Generic reverse relation for attachments — same pattern as Question/Answer.
+    attachments = GenericRelation('Attachment', related_query_name='post')
+
+    class Meta:
+        db_table = 'posts'
+        verbose_name = _('post')
+        verbose_name_plural = _('posts')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-created_at'], name='idx_p_created'),
+            models.Index(fields=['author', '-created_at'], name='idx_p_author_created'),
+        ]
+
+    def __str__(self):
+        return f"Post by {self.author.username}: {self.content[:50]}"
+
+
+class PostReaction(models.Model):
+    """A user's like or dislike on a Post.
+
+    The unique_together constraint enforces that a single user has at most
+    ONE reaction per post. Switching from like to dislike is an UPDATE on the
+    existing row — never a second row. Toggling off (unliking) deletes the row.
+    """
+
+    REACTION_CHOICES = [
+        ('like', 'Like'),
+        ('dislike', 'Dislike'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='post_reactions',
+    )
+    post = models.ForeignKey(
+        'Post',
+        on_delete=models.CASCADE,
+        related_name='reactions',
+    )
+    reaction = models.CharField(max_length=10, choices=REACTION_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'post_reactions'
+        unique_together = ('user', 'post')
+        indexes = [
+            models.Index(fields=['post', 'reaction'], name='idx_pr_post_reaction'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} {self.reaction}d {self.post_id}"

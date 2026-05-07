@@ -953,3 +953,150 @@ A user can answer their own question. Use case: "I figured it out myself, here's
 #### Anyone can reply to anyone
 
 Replies aren't restricted to the question's author. Any authenticated user can reply to any answer to start a multi-party discussion. UI-wise, treat it like a forum thread.
+
+---
+
+## Posts (Sprint 2 — Item 2)
+
+Knowledge-sharing posts. Same shape as Q&A's Question (no resolve flag) plus likes/dislikes.
+
+### List Posts
+`GET /api/posts/`
+
+Paginated newest-first. Filters: `?author=`, `?specialization=`, `?q=`. Anonymous reads OK.
+
+**Response card shape**:
+```json
+{
+  "id": "uuid",
+  "author": { "id": "...", "username": "...", "profile_image_url": "..." },
+  "content_preview": "first 120 chars of post content",
+  "specializations": [{ "id": "...", "name": "Backend" }],
+  "attachments": [],
+  "likes_count": 42,
+  "dislikes_count": 3,
+  "my_reaction": "like",     // "like" | "dislike" | null (null when anonymous)
+  "comments_count": 12,
+  "created_at": "..."
+}
+```
+
+### Create a Post
+`POST /api/posts/`
+
+Auth required. Same JSON-or-multipart body as questions. Counts initialize to 0.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `content` | `string` | yes | 1–5000 chars |
+| `specializations` | `string[] (UUIDs)` | yes | 1–3 specs |
+| `attachments` | `file[]` | no | Multipart only, max 4. Same MIME/size rules as Q&A. |
+
+The server tolerates comma-joined UUIDs in `specializations` (e.g. `"uuid1,uuid2"`) for clients that submit multipart arrays as a single string.
+
+### Get / Update / Delete a Post
+- `GET /api/posts/{id}/` — full content + first 10 top-level comments (with first 2 replies each).
+- `PATCH /api/posts/{id}/` — author only, content / specs only.
+- `DELETE /api/posts/{id}/` — author only. Cascades to attachments, reactions, and comments.
+
+### Like / Dislike (Toggle)
+
+`POST /api/posts/{id}/like/` and `POST /api/posts/{id}/dislike/`
+
+No request body. Behaves like Twitter/Instagram:
+
+| Current state | Tap **like** | Tap **dislike** |
+|---|---|---|
+| no reaction | adds like | adds dislike |
+| like | removes (toggles off) | switches to dislike |
+| dislike | switches to like | removes (toggles off) |
+
+The DB enforces **at most one reaction per user per post** via a `unique_together` constraint — switching is an UPDATE, never a duplicate row.
+
+**Response (200)**: full post detail with updated `likes_count`, `dislikes_count`, and the viewer's new `my_reaction`. Render directly without re-fetching.
+
+| Error | When |
+|---|---|
+| 401 | Not authenticated |
+| 404 | Post does not exist |
+
+---
+
+## Comments + Replies on Posts (Sprint 2 — Item 3)
+
+Same depth-1 pattern as Q&A's answers + replies. **No attachments on comments. The post's author can also delete comments on their post (light moderation).**
+
+### Endpoints
+
+```
+GET    /api/posts/{post_id}/comments/         list top-level comments
+POST   /api/posts/{post_id}/comments/         post a top-level comment
+GET    /api/comments/{id}/                    fetch a comment or reply
+PATCH  /api/comments/{id}/                    edit content (author only)
+DELETE /api/comments/{id}/                    delete (comment author OR post author)
+GET    /api/comments/{id}/replies/            list replies under a top-level comment
+POST   /api/comments/{id}/replies/            post a reply (depth-1 cap)
+```
+
+### Comment shape
+
+```json
+{
+  "id": "uuid",
+  "post": "uuid-of-parent-post",
+  "author": { ... },
+  "content": "...",
+  "parent_comment": null,    // null = top-level, UUID = reply
+  "replies_count": 3,        // always 0 for replies (depth-1 cap)
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+### Permission summary
+
+| Action | Who can do it |
+|---|---|
+| Read any comment / reply | Anyone (auth optional) |
+| Create comment / reply | Any authenticated user |
+| Edit content | The comment's own author |
+| Delete | The comment's author **OR** the post's author |
+
+The post-author moderation rule means a user posting on someone else's post can have that comment removed by the post owner — but not edited.
+
+### Replying to a reply
+
+The server returns 400 with `parent_comment: "Replies cannot have replies — depth limit is 1."` if you try. Validate client-side or just don't show a Reply button on rows where `parent_comment != null`.
+
+---
+
+## Certificates (Sprint 2 — Item 4)
+
+A user's professional certifications. Model: `id`, `title`, `issuer`, `issue_date`, `certificate_url` (the model already shipped in Sprint 1; this sprint adds the endpoints).
+
+### Endpoints
+
+```
+GET    /api/users/me/certificates/                    list my own
+POST   /api/users/me/certificates/                    add a certificate
+DELETE /api/users/me/certificates/{id}/               delete my own
+GET    /api/users/{user_id}/certificates/             public list of someone's certs
+```
+
+### Body for create
+
+```json
+{
+  "title": "Django Mastery",
+  "issuer": "edX",
+  "issue_date": "2026-04-15",
+  "certificate_url": "https://example.com/cert/abc"
+}
+```
+
+The server sets the owning user from `request.user` — sending a `user` field in the body has no effect.
+
+### Permission notes
+
+- **My-list** and **delete**: queryset filtered to `request.user`. Trying to delete someone else's certificate by guessing its UUID returns **404**, not 403 — by design (don't leak existence).
+- **Public list**: anonymous reads OK. Useful for rendering profile pages.

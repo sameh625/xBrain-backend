@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password as django_
 from django.core.exceptions import ValidationError
 from .models import (
     User, Specialization, Certificate, PointsWallet,
-    Question, Answer, Attachment, Post, PostReaction,
+    Question, Answer, Attachment, Post, PostReaction, Comment,
 )
 from .utils import (
     validate_password_strength,
@@ -602,7 +602,47 @@ def _attach_files_to(parent, files):
         )
 
 
-class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
+# Characters Swagger UI / users sometimes wrap UUIDs in.
+_QUOTE_CHARS = '"\'“”‘’'
+
+
+def _split_csv_value(raw):
+    """Turn a comma-joined string of UUIDs (with optional quote wrappers) into
+    a clean list of UUID strings. No-op for inputs that aren't strings."""
+    if not isinstance(raw, str):
+        return raw
+    stripped = raw.strip().strip(_QUOTE_CHARS).strip()
+    parts = [p.strip().strip(_QUOTE_CHARS).strip() for p in stripped.split(',')]
+    return [p for p in parts if p]
+
+
+class _CommaTolerantSpecsMixin:
+    """ModelSerializer mixin that normalizes the `specializations` field when
+    it arrives as a single comma-joined string (Swagger UI multipart quirk).
+
+    With multipart/form-data, an array of UUIDs is supposed to come in as
+    multiple form parts with the same name. Some Swagger UI versions instead
+    join them into one string like `uuid1,uuid2` (sometimes wrapped in curly
+    quotes from copy-paste). This mixin re-splits that into a real list before
+    the field-level UUID validators run."""
+
+    def to_internal_value(self, data):
+        # QueryDict (multipart) — use getlist to preserve multi-value semantics.
+        if hasattr(data, 'getlist'):
+            specs = data.getlist('specializations')
+            if len(specs) == 1 and isinstance(specs[0], str) and ',' in specs[0]:
+                parts = _split_csv_value(specs[0])
+                data = data.copy()
+                data.setlist('specializations', parts)
+        elif isinstance(data, dict) and 'specializations' in data:
+            value = data['specializations']
+            if isinstance(value, str) and ',' in value:
+                data = dict(data)
+                data['specializations'] = _split_csv_value(value)
+        return super().to_internal_value(data)
+
+
+class QuestionCreateUpdateSerializer(_CommaTolerantSpecsMixin, serializers.ModelSerializer):
     """Write representation for creating or updating a Question.
 
     Accepts the question's content, between one and three specialization UUIDs,
@@ -748,8 +788,8 @@ class PostListSerializer(serializers.ModelSerializer):
 class PostDetailSerializer(serializers.ModelSerializer):
     """Detail representation used by GET /api/posts/{id}/.
 
-    Same as the list shape plus the full content (no preview) and
-    `updated_at`. Comments will be embedded inline once Block 2 ships."""
+    Same as the list shape plus the full content, `updated_at`, and the first
+    10 top-level comments embedded inline (each with their first 2 replies)."""
     author = PublicAuthorSerializer(read_only=True)
     specializations = SpecializationCompactSerializer(many=True, read_only=True)
     attachments = AttachmentSerializer(many=True, read_only=True)
@@ -757,6 +797,7 @@ class PostDetailSerializer(serializers.ModelSerializer):
     dislikes_count = serializers.IntegerField(read_only=True, default=0)
     my_reaction = serializers.CharField(read_only=True, allow_null=True, default=None)
     comments_count = serializers.IntegerField(read_only=True, default=0)
+    comments = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -764,12 +805,22 @@ class PostDetailSerializer(serializers.ModelSerializer):
             'id', 'author', 'content', 'specializations',
             'attachments',
             'likes_count', 'dislikes_count', 'my_reaction',
-            'comments_count',
+            'comments_count', 'comments',
             'created_at', 'updated_at',
         ]
 
+    def get_comments(self, obj):
+        from django.db.models import Count
+        top_level = (
+            obj.comments
+               .filter(parent_comment__isnull=True)
+               .annotate(replies_count=Count('replies'))
+               .order_by('created_at')[:10]
+        )
+        return TopLevelCommentWithRepliesSerializer(top_level, many=True, context=self.context).data
 
-class PostCreateUpdateSerializer(serializers.ModelSerializer):
+
+class PostCreateUpdateSerializer(_CommaTolerantSpecsMixin, serializers.ModelSerializer):
     """Write representation for creating or updating a Post.
 
     Mirrors QuestionCreateUpdateSerializer (no resolved flag). Accepts content,
@@ -824,3 +875,82 @@ class PostCreateUpdateSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         validated_data.pop('attachments', None)
         return super().update(instance, validated_data)
+
+
+# =====================================================================
+# Comments + Replies on Posts (Sprint 2 — Item 3)
+# Mirrors Q&A's Answer/Reply pattern. Depth-1, no attachments, post-author can moderate.
+# =====================================================================
+
+
+class CommentSerializer(serializers.ModelSerializer):
+    """Read shape for a top-level comment OR a reply.
+
+    Always includes the parent post's UUID so clients fetching a single
+    comment know which post it belongs to."""
+    author = PublicAuthorSerializer(read_only=True)
+    post = serializers.PrimaryKeyRelatedField(read_only=True)
+    parent_comment = serializers.PrimaryKeyRelatedField(read_only=True)
+    replies_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Comment
+        fields = [
+            'id', 'post', 'author', 'content', 'parent_comment',
+            'replies_count', 'created_at', 'updated_at',
+        ]
+
+
+class TopLevelCommentWithRepliesSerializer(serializers.ModelSerializer):
+    """Top-level comment that embeds the first 2 replies inline.
+
+    Used inside PostDetailSerializer.comments so the most common screen renders
+    without a follow-up request per comment."""
+    author = PublicAuthorSerializer(read_only=True)
+    post = serializers.PrimaryKeyRelatedField(read_only=True)
+    parent_comment = serializers.PrimaryKeyRelatedField(read_only=True)
+    replies_count = serializers.IntegerField(read_only=True, default=0)
+    replies = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Comment
+        fields = [
+            'id', 'post', 'author', 'content', 'parent_comment',
+            'replies_count', 'replies', 'created_at', 'updated_at',
+        ]
+
+    @extend_schema_field(CommentSerializer(many=True))
+    def get_replies(self, obj):
+        first_replies = obj.replies.all()[:2]
+        return CommentSerializer(first_replies, many=True, context=self.context).data
+
+
+class CommentCreateSerializer(serializers.ModelSerializer):
+    """Write representation for posting a top-level comment OR a reply.
+
+    Client sends only `content`. The view fills in `post`, `parent_comment`
+    (for replies), and `author` based on URL kwargs and the authenticated user."""
+
+    class Meta:
+        model = Comment
+        fields = ['id', 'content']
+        read_only_fields = ['id']
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value
+
+
+class CommentUpdateSerializer(serializers.ModelSerializer):
+    """Edit an existing comment or reply. Only `content` may change."""
+
+    class Meta:
+        model = Comment
+        fields = ['id', 'content']
+        read_only_fields = ['id']
+
+    def validate_content(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content cannot be empty.")
+        return value

@@ -33,12 +33,16 @@ from .serializers import (
     PostListSerializer,
     PostDetailSerializer,
     PostCreateUpdateSerializer,
+    CommentSerializer,
+    CommentCreateSerializer,
+    CommentUpdateSerializer,
+    CertificateSerializer,
 )
 from .models import (
     User, Specialization, UserSpecialization,
-    Question, Answer, Post, PostReaction,
+    Question, Answer, Post, PostReaction, Comment, Certificate,
 )
-from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor
+from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor, IsCommentDeletable
 
 
 class RegisterView(APIView):
@@ -891,7 +895,7 @@ def _post_queryset_with_counts(viewer=None):
     qs = (
         Post.objects
         .select_related('author')
-        .prefetch_related('specializations', 'attachments')
+        .prefetch_related('specializations', 'attachments', 'comments')
         .annotate(
             likes_count=Count(
                 'reactions',
@@ -903,6 +907,7 @@ def _post_queryset_with_counts(viewer=None):
                 filter=Q(reactions__reaction='dislike'),
                 distinct=True,
             ),
+            comments_count=Count('comments', distinct=True),
         )
     )
     if viewer is not None and getattr(viewer, 'is_authenticated', False):
@@ -1095,3 +1100,267 @@ class PostDislikeView(_PostReactionToggleView):
     )
     def post(self, request, pk):
         return self._toggle(request, pk)
+
+
+# =====================================================================
+# Certificates (Sprint 2 — Item 4)
+#
+# The model already shipped in Sprint 1; only endpoints are new.
+# =====================================================================
+
+
+class MyCertificatesListCreateView(generics.ListCreateAPIView):
+    """GET /api/users/me/certificates/  — my certificates.
+    POST /api/users/me/certificates/ — add a new certificate."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = CertificateSerializer
+
+    def get_queryset(self):
+        return Certificate.objects.filter(user=self.request.user).order_by('-issue_date')
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_06_my_certificates_list',
+        summary="List my certificates",
+        description="Returns the authenticated user's certificates, newest issue date first.",
+        responses={200: CertificateSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_07_my_certificate_create',
+        summary="Add a certificate",
+        description="Authenticated users only. The owning user is taken from the request — never accepted from the client body.",
+        request=CertificateSerializer,
+        responses={
+            201: CertificateSerializer,
+            400: OpenApiResponse(description="Validation error (e.g., bad URL)."),
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+
+class MyCertificateDeleteView(generics.DestroyAPIView):
+    """DELETE /api/users/me/certificates/{id}/ — delete one of my certificates.
+
+    The queryset is filtered to the current user, so trying to delete someone
+    else's certificate by guessing the UUID returns 404, not 403."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = CertificateSerializer
+
+    def get_queryset(self):
+        return Certificate.objects.filter(user=self.request.user)
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_08_my_certificate_delete',
+        summary="Delete one of my certificates",
+        responses={
+            204: OpenApiResponse(description='Certificate deleted.'),
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Not found (or not yours)."),
+        },
+    )
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class UserCertificatesPublicView(generics.ListAPIView):
+    """GET /api/users/{user_id}/certificates/ — public list of any user's certificates.
+
+    Read-only and anyone (anonymous OK) can view. Useful for showing a profile
+    page's credentials. Authenticated callers see the same data as anonymous."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    serializer_class = CertificateSerializer
+
+    def get_queryset(self):
+        return Certificate.objects.filter(
+            user_id=self.kwargs['user_id']
+        ).order_by('-issue_date')
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_09_user_certificates',
+        summary="List a user's certificates (public)",
+        description="Returns certificates for the user identified by the URL UUID. Public — no auth required.",
+        responses={200: CertificateSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+def _comment_queryset_with_counts():
+    return (
+        Comment.objects
+        .select_related('author', 'post')
+        .annotate(replies_count=Count('replies'))
+    )
+
+
+class CommentListCreateView(generics.ListCreateAPIView):
+    """GET / POST /api/posts/{post_id}/comments/ — top-level comments only."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return CommentCreateSerializer
+        return CommentSerializer
+
+    def get_queryset(self):
+        post_id = self.kwargs['post_id']
+        get_object_or_404(Post, pk=post_id)
+        return (
+            _comment_queryset_with_counts()
+            .filter(post_id=post_id, parent_comment__isnull=True)
+            .order_by('created_at')
+        )
+
+    def create(self, request, *args, **kwargs):
+        post = get_object_or_404(Post, pk=self.kwargs['post_id'])
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        comment = serializer.save(
+            author=request.user,
+            post=post,
+            parent_comment=None,
+        )
+        comment = _comment_queryset_with_counts().get(pk=comment.pk)
+        return Response(
+            CommentSerializer(comment, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_08_comments_list',
+        summary="List top-level comments under a post.",
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_09_comment_create',
+        summary="Post a top-level comment on a post.",
+        request=CommentCreateSerializer,
+        responses={
+            201: CommentSerializer,
+            400: OpenApiResponse(description="Validation error."),
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Post not found."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+
+class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/comments/{id}/ — works for both top-level
+    comments and replies. Delete permission: comment author OR post author."""
+    permission_classes = [IsAuthenticatedOrReadOnly, IsCommentDeletable]
+    http_method_names = ['get', 'patch', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return _comment_queryset_with_counts()
+
+    def get_serializer_class(self):
+        if self.request.method == 'PATCH':
+            return CommentUpdateSerializer
+        return CommentSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        instance = self.get_queryset().get(pk=instance.pk)
+        return Response(CommentSerializer(instance, context={'request': request}).data)
+
+    @extend_schema(tags=['Posts'], operation_id='posts_10_comment_detail', summary="Get a comment or reply.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_11_comment_update',
+        summary="Edit a comment or reply (author only). Content only.",
+        request=CommentUpdateSerializer,
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_12_comment_delete',
+        summary="Delete a comment/reply (author OR post-author). Cascades to replies.",
+    )
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class CommentReplyListCreateView(generics.ListCreateAPIView):
+    """GET / POST /api/comments/{id}/replies/ — replies under a top-level comment."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return CommentCreateSerializer
+        return CommentSerializer
+
+    def get_queryset(self):
+        parent_id = self.kwargs['pk']
+        get_object_or_404(Comment, pk=parent_id)
+        return (
+            _comment_queryset_with_counts()
+            .filter(parent_comment_id=parent_id)
+            .order_by('created_at')
+        )
+
+    def create(self, request, *args, **kwargs):
+        parent = get_object_or_404(Comment, pk=self.kwargs['pk'])
+
+        # Depth-1 enforcement.
+        if parent.parent_comment_id is not None:
+            raise DRFValidationError(
+                {"parent_comment": "Replies cannot have replies — depth limit is 1."}
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reply = serializer.save(
+            author=request.user,
+            post=parent.post,
+            parent_comment=parent,
+        )
+        reply = _comment_queryset_with_counts().get(pk=reply.pk)
+        return Response(
+            CommentSerializer(reply, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(tags=['Posts'], operation_id='posts_13_replies_list', summary="List replies under a comment.")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_14_reply_create',
+        summary="Post a reply to a comment.",
+        description="The parent must be a top-level comment (depth-1 limit). Replying to a reply returns 400.",
+        request=CommentCreateSerializer,
+        responses={
+            201: CommentSerializer,
+            400: OpenApiResponse(description="Cannot reply to a reply (depth-1 limit)."),
+            401: OpenApiResponse(description="Authentication required."),
+            404: OpenApiResponse(description="Parent comment not found."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)

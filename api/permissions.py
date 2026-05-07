@@ -15,3 +15,17 @@ class IsQuestionAuthor(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         return obj.author_id == request.user.id
+
+
+class IsCommentDeletable(BasePermission):
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        if request.method == 'DELETE':
+            return (
+                obj.author_id == request.user.id
+                or obj.post.author_id == request.user.id
+            )
+        # PATCH — author only
+        return obj.author_id == request.user.id

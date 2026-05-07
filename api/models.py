@@ -578,3 +578,50 @@ class PostReaction(models.Model):
 
     def __str__(self):
         return f"{self.user.username} {self.reaction}d {self.post_id}"
+
+
+class Comment(models.Model):
+    """Comment or reply on a Post.
+
+    Mirrors the Q&A Answer pattern: one model handles both top-level comments
+    and replies, distinguished by `parent_comment`. Depth capped at 1 (replies
+    cannot have replies). No resolve flag — Posts aren't problems to solve."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(
+        'Post',
+        on_delete=models.CASCADE,
+        related_name='comments',
+    )
+    author = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='comments',
+    )
+    content = models.TextField(max_length=1000)
+    parent_comment = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'comments'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['post', 'parent_comment', 'created_at'], name='idx_c_post_parent_created'),
+            models.Index(fields=['author', '-created_at'], name='idx_c_author_created'),
+        ]
+
+    def clean(self):
+        # Depth-1 enforcement at the model level.
+        if self.parent_comment and self.parent_comment.parent_comment_id is not None:
+            raise ValidationError('Replies cannot have replies — depth limit is 1.')
+
+    def __str__(self):
+        kind = "Reply" if self.parent_comment_id else "Comment"
+        return f"{kind} by {self.author.username} on Post {self.post_id}"

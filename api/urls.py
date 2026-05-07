@@ -35,6 +35,12 @@ from .views import (
     PostDetailView,
     PostLikeView,
     PostDislikeView,
+    MyCertificatesListCreateView,
+    MyCertificateDeleteView,
+    UserCertificatesPublicView,
+    CommentListCreateView,
+    CommentDetailView,
+    CommentReplyListCreateView,
 )
 
 app_name = 'api'
@@ -69,4 +75,14 @@ urlpatterns = [
     path('posts/<uuid:pk>/', PostDetailView.as_view(), name='post-detail'),
     path('posts/<uuid:pk>/like/', PostLikeView.as_view(), name='post-like'),
     path('posts/<uuid:pk>/dislike/', PostDislikeView.as_view(), name='post-dislike'),
+
+    # Certificates (Sprint 2 — Item 4)
+    path('users/me/certificates/', MyCertificatesListCreateView.as_view(), name='my-certificates'),
+    path('users/me/certificates/<uuid:pk>/', MyCertificateDeleteView.as_view(), name='my-certificate-delete'),
+    path('users/<uuid:user_id>/certificates/', UserCertificatesPublicView.as_view(), name='user-certificates'),
+
+    # Comments + replies on Posts (Sprint 2 — Item 3)
+    path('posts/<uuid:post_id>/comments/', CommentListCreateView.as_view(), name='post-comments'),
+    path('comments/<uuid:pk>/', CommentDetailView.as_view(), name='comment-detail'),
+    path('comments/<uuid:pk>/replies/', CommentReplyListCreateView.as_view(), name='comment-replies'),
 ]

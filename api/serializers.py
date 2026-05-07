@@ -562,13 +562,22 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
 
 @extend_schema_field({'type': 'string', 'format': 'binary'})
 class BinaryFileField(serializers.FileField):
-    """A FileField that renders as `format: binary` in the OpenAPI schema.
+    """A FileField that renders as `format: binary` in the OpenAPI schema and
+    treats non-file values as "no attachment" instead of raising a validation
+    error.
 
-    drf-spectacular's default for ListField(child=FileField()) emits
-    `array<string>`, which makes Swagger UI send a literal "string" placeholder
-    when no file is chosen. Annotating the child field as binary fixes
-    that — Swagger renders a real multi-file picker."""
-    pass
+    Swagger UI's array editor sometimes injects a literal `"string"` placeholder
+    when the user clicks Execute without picking a real file. Plain FileField
+    rejects that with "The submitted data was not a file." We just want the
+    request to succeed with no attachment in that case — the field is optional
+    by design.
+    """
+    def to_internal_value(self, data):
+        # Anything that isn't a file-like object → treat as "no attachment".
+        # Real uploaded files have a .read() method (UploadedFile / File).
+        if not hasattr(data, 'read'):
+            return None
+        return super().to_internal_value(data)
 
 
 def _attach_files_to(parent, files):
@@ -631,9 +640,10 @@ class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
         return value
 
     def validate_attachments(self, value):
-        for f in value:
+        real_files = [f for f in value if f is not None]
+        for f in real_files:
             classify_and_validate_attachment(f)
-        return value
+        return real_files
 
     def create(self, validated_data):
         files = validated_data.pop('attachments', [])
@@ -675,9 +685,10 @@ class AnswerCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate_attachments(self, value):
-        for f in value:
+        real_files = [f for f in value if f is not None]
+        for f in real_files:
             classify_and_validate_attachment(f)
-        return value
+        return real_files
 
     def create(self, validated_data):
         files = validated_data.pop('attachments', [])

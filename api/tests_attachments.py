@@ -246,6 +246,40 @@ class AttachmentValidationTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
         self.assertEqual(res.data['attachments'], [])
 
+    def test_swagger_string_placeholder_treated_as_no_attachment(self):
+        # Reproduces the Swagger UI bug: when the user clicks "Add string item"
+        # and Execute without picking a real file, Swagger sends the literal
+        # "string" in the multipart body. The server must treat that as "no
+        # attachment" and succeed, NOT reject with "submitted data is not a file".
+        res = self.client.post(
+            reverse('api:questions'),
+            {
+                'content': 'Swagger placeholder',
+                'specializations': [str(self.spec.id)],
+                'attachments': 'string',
+            },
+            format='multipart',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(res.data['attachments'], [])
+
+    def test_one_real_file_alongside_swagger_placeholder_works(self):
+        # Mixed: one real file + one empty placeholder row. Real file should
+        # persist; placeholder should be silently dropped.
+        real_file = _file('photo.jpg', 'image/jpeg', size_bytes=1024)
+        res = self.client.post(
+            reverse('api:questions'),
+            {
+                'content': 'mixed',
+                'specializations': [str(self.spec.id)],
+                'attachments': [real_file, 'string'],
+            },
+            format='multipart',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(len(res.data['attachments']), 1)
+        self.assertEqual(res.data['attachments'][0]['kind'], 'image')
+
     def test_plain_json_request_still_works_no_attachments(self):
         # Backwards compat: existing JSON requests with no files keep working.
         res = self.client.post(

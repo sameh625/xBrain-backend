@@ -41,6 +41,12 @@ from .views import (
     CommentListCreateView,
     CommentDetailView,
     CommentReplyListCreateView,
+    MyPostsListView,
+    MyQuestionsListView,
+    UserPostsListView,
+    UserQuestionsListView,
+    UserProfileDetailView,
+    UserPublicSpecializationsView,
 )
 
 app_name = 'api'
@@ -85,4 +91,12 @@ urlpatterns = [
     path('posts/<uuid:post_id>/comments/', CommentListCreateView.as_view(), name='post-comments'),
     path('comments/<uuid:pk>/', CommentDetailView.as_view(), name='comment-detail'),
     path('comments/<uuid:pk>/replies/', CommentReplyListCreateView.as_view(), name='comment-replies'),
+
+    # User-scoped feeds: my posts/questions, other users' posts/questions, public profile
+    path('users/me/posts/', MyPostsListView.as_view(), name='my-posts'),
+    path('users/me/questions/', MyQuestionsListView.as_view(), name='my-questions'),
+    path('users/<uuid:user_id>/', UserProfileDetailView.as_view(), name='user-profile-public'),
+    path('users/<uuid:user_id>/posts/', UserPostsListView.as_view(), name='user-posts'),
+    path('users/<uuid:user_id>/questions/', UserQuestionsListView.as_view(), name='user-questions'),
+    path('users/<uuid:user_id>/specializations/', UserPublicSpecializationsView.as_view(), name='user-specializations-public'),
 ]

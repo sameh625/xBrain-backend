@@ -208,6 +208,8 @@ class UserDetailSerializer(serializers.ModelSerializer):
     wallet = PointsWalletSerializer(read_only=True)
     profile_image_url = serializers.SerializerMethodField()
     specialization_form_completed_at = serializers.DateTimeField(read_only=True)
+    posts_count = serializers.SerializerMethodField()
+    questions_count = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -223,11 +225,13 @@ class UserDetailSerializer(serializers.ModelSerializer):
             'specializations',
             'specialization_form_completed_at',
             'wallet',
+            'posts_count',
+            'questions_count',
             'created_at',
             'updated_at',
         ]
         read_only_fields = ['id', 'email', 'created_at', 'updated_at', 'specialization_form_completed_at']
-    
+
     def get_profile_image_url(self, obj):
         if obj.profile_image:
             request = self.context.get('request')
@@ -235,6 +239,59 @@ class UserDetailSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.profile_image.url)
             return obj.profile_image.url
         return None
+
+    def get_posts_count(self, obj) -> int:
+        return Post.objects.filter(author_id=obj.id).count()
+
+    def get_questions_count(self, obj) -> int:
+        return Question.objects.filter(author_id=obj.id).count()
+
+
+class PublicUserProfileSerializer(serializers.ModelSerializer):
+    """Public profile returned by GET /api/users/{user_id}/.
+
+    Exposes only public-safe fields (no email, phone, wallet, or internal flags).
+    Specializations are returned as a list of names. Includes counts of the
+    user's authored posts and questions.
+    """
+    profile_image_url = serializers.SerializerMethodField()
+    specializations = serializers.SerializerMethodField()
+    posts_count = serializers.SerializerMethodField()
+    questions_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'first_name',
+            'last_name',
+            'bio',
+            'profile_image_url',
+            'specializations',
+            'posts_count',
+            'questions_count',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_profile_image_url(self, obj) -> str | None:
+        if obj.profile_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_image.url)
+            return obj.profile_image.url
+        return None
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_specializations(self, obj):
+        return list(obj.specializations.values_list('name', flat=True))
+
+    def get_posts_count(self, obj) -> int:
+        return Post.objects.filter(author_id=obj.id).count()
+
+    def get_questions_count(self, obj) -> int:
+        return Question.objects.filter(author_id=obj.id).count()
 
 
 class UpdateProfileSerializer(serializers.ModelSerializer):
@@ -444,12 +501,12 @@ class AttachmentSerializer(serializers.ModelSerializer):
 
 
 class PublicAuthorSerializer(serializers.ModelSerializer):
-    """Compact public profile used as the nested 'author' on Q&A responses."""
+    """Compact public profile used as the nested 'author' on Q&A and Posts responses."""
     profile_image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'profile_image_url']
+        fields = ['id', 'username', 'first_name', 'last_name', 'profile_image_url']
 
     def get_profile_image_url(self, obj) -> str | None:
         if obj.profile_image:

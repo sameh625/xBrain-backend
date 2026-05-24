@@ -40,6 +40,8 @@ from .serializers import (
     CommentCreateSerializer,
     CommentUpdateSerializer,
     CertificateSerializer,
+    PublicUserProfileSerializer,
+    SpecializationCompactSerializer,
 )
 from .models import (
     User, Specialization, UserSpecialization,
@@ -1209,6 +1211,163 @@ class UserCertificatesPublicView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User-scoped feeds (my posts/questions, other-user posts/questions, profile)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MyPostsListView(generics.ListAPIView):
+    """GET /api/users/me/posts/ — current user's authored posts, newest first."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostListSerializer
+
+    def get_queryset(self):
+        return (
+            _post_queryset_with_counts(viewer=self.request.user)
+            .filter(author=self.request.user)
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_10_my_posts',
+        summary="List the current user's posts",
+        description="Paginated, newest-first list of posts authored by the authenticated user.",
+        responses={200: PostListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class MyQuestionsListView(generics.ListAPIView):
+    """GET /api/users/me/questions/ — current user's authored questions, newest first."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = QuestionListSerializer
+
+    def get_queryset(self):
+        return (
+            _question_queryset_with_counts()
+            .filter(author=self.request.user)
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_11_my_questions',
+        summary="List the current user's questions",
+        description="Paginated, newest-first list of questions authored by the authenticated user.",
+        responses={200: QuestionListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class UserPostsListView(generics.ListAPIView):
+    """GET /api/users/{user_id}/posts/ — any user's authored posts, newest first."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostListSerializer
+
+    def get_queryset(self):
+        # 404 if the user doesn't exist
+        get_object_or_404(User, pk=self.kwargs['user_id'])
+        return (
+            _post_queryset_with_counts(viewer=self.request.user)
+            .filter(author_id=self.kwargs['user_id'])
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_12_user_posts',
+        summary="List a user's posts",
+        description="Paginated, newest-first list of posts authored by the user identified by the URL UUID.",
+        responses={
+            200: PostListSerializer(many=True),
+            404: OpenApiResponse(description="User not found."),
+        },
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class UserQuestionsListView(generics.ListAPIView):
+    """GET /api/users/{user_id}/questions/ — any user's authored questions, newest first."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = QuestionListSerializer
+
+    def get_queryset(self):
+        get_object_or_404(User, pk=self.kwargs['user_id'])
+        return (
+            _question_queryset_with_counts()
+            .filter(author_id=self.kwargs['user_id'])
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_13_user_questions',
+        summary="List a user's questions",
+        description="Paginated, newest-first list of questions authored by the user identified by the URL UUID.",
+        responses={
+            200: QuestionListSerializer(many=True),
+            404: OpenApiResponse(description="User not found."),
+        },
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class UserProfileDetailView(generics.RetrieveAPIView):
+    """GET /api/users/{user_id}/ — public profile of any user."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PublicUserProfileSerializer
+    queryset = User.objects.all()
+    lookup_url_kwarg = 'user_id'
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_14_user_profile_public',
+        summary="Get a user's public profile",
+        description=(
+            "Returns the public profile (no email, phone, or wallet) of the user identified "
+            "by the URL UUID. Includes the user's specializations (by name) and counts of "
+            "their authored posts and questions."
+        ),
+        responses={
+            200: PublicUserProfileSerializer,
+            404: OpenApiResponse(description="User not found."),
+        },
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class UserPublicSpecializationsView(generics.ListAPIView):
+    """GET /api/users/{user_id}/specializations/ — public list of a user's specializations."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = SpecializationCompactSerializer
+    pagination_class = None  # specializations are few — return them all
+
+    def get_queryset(self):
+        get_object_or_404(User, pk=self.kwargs['user_id'])
+        return Specialization.objects.filter(
+            specialization_users__user_id=self.kwargs['user_id']
+        ).order_by('name')
+
+    @extend_schema(
+        tags=['Users'],
+        operation_id='users_15_user_specializations',
+        summary="List a user's specializations (public)",
+        description="Returns the specializations of the user identified by the URL UUID.",
+        responses={
+            200: SpecializationCompactSerializer(many=True),
+            404: OpenApiResponse(description="User not found."),
+        },
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
 
 def _comment_queryset_with_counts():
     return (

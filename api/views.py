@@ -1577,7 +1577,7 @@ class RequestMeetingView(APIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_01_request',
+        operation_id='meetings_04_request',
         summary="Request a live meeting on an answer",
         description=(
             "The question's author proposes 1–5 time slots to the answerer. "
@@ -1654,7 +1654,7 @@ class AcceptMeetingView(APIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_02_accept',
+        operation_id='meetings_05_accept',
         summary="Accept one of the proposed slots",
         description=(
             "Only the answerer can call this. The chosen slot must be one of "
@@ -1748,7 +1748,7 @@ class DeclineMeetingView(APIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_03_decline',
+        operation_id='meetings_06_decline',
         summary="Decline a meeting request",
         description="Only the answerer can call this. Optional short message to the asker.",
         request=MeetingRequestDeclineSerializer,
@@ -1795,7 +1795,7 @@ class CancelMeetingView(APIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_04_cancel',
+        operation_id='meetings_07_cancel',
         summary="Cancel a meeting request",
         description=(
             "Only the asker can cancel. If the meeting was already scheduled, "
@@ -1851,7 +1851,7 @@ class MyOutgoingMeetingRequestsView(generics.ListAPIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_05_outgoing',
+        operation_id='meetings_01_outgoing',
         summary="List meeting requests I sent",
         description="Paginated list of meeting requests where I am the asker. Newest first.",
         responses={200: MeetingRequestSerializer(many=True)},
@@ -1874,7 +1874,7 @@ class MyIncomingMeetingRequestsView(generics.ListAPIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_06_incoming',
+        operation_id='meetings_02_incoming',
         summary="List meeting requests sent to me",
         description="Paginated list of meeting requests where I am the answerer. Newest first.",
         responses={200: MeetingRequestSerializer(many=True)},
@@ -1895,7 +1895,7 @@ class MeetingRequestDetailView(generics.RetrieveAPIView):
 
     @extend_schema(
         tags=['Meetings'],
-        operation_id='meetings_07_detail',
+        operation_id='meetings_03_detail',
         summary="Get a meeting request's detail",
         description="Only the asker or the answerer may view a meeting request.",
         responses={

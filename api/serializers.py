@@ -190,10 +190,67 @@ class SpecializationSerializer(serializers.ModelSerializer):
 
 
 class CertificateSerializer(serializers.ModelSerializer):
+    """Certificate serializer.
+
+    Accepts either an external URL, an uploaded file (PDF or image), or both.
+    At least one of the two must be provided. The uploaded file is exposed in
+    responses as an absolute URL via `certificate_file_url`.
+    """
+    certificate_file = serializers.FileField(required=False, allow_null=True, write_only=True)
+    certificate_file_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Certificate
-        fields = ['id', 'title', 'issuer', 'issue_date', 'certificate_url']
-        read_only_fields = ['id']
+        fields = [
+            'id', 'title', 'issuer', 'issue_date',
+            'certificate_url', 'certificate_file', 'certificate_file_url',
+        ]
+        read_only_fields = ['id', 'certificate_file_url']
+        extra_kwargs = {
+            'certificate_url': {'required': False, 'allow_null': True, 'allow_blank': True},
+        }
+
+    def get_certificate_file_url(self, obj) -> str | None:
+        if obj.certificate_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.certificate_file.url)
+            return obj.certificate_file.url
+        return None
+
+    def validate_certificate_file(self, value):
+        if value in (None, ''):
+            return None
+        # Accept only PDF or image, with size limits from ATTACHMENT_LIMITS
+        from .utils import ATTACHMENT_LIMITS
+        mime = (value.content_type or '').lower()
+        for kind in ('image', 'pdf'):
+            limits = ATTACHMENT_LIMITS[kind]
+            if mime in limits['mime_types']:
+                if value.size > limits['max_bytes']:
+                    max_mb = limits['max_bytes'] // (1024 * 1024)
+                    raise serializers.ValidationError(
+                        f'{kind.capitalize()} file too large (max {max_mb} MB).'
+                    )
+                return value
+        raise serializers.ValidationError(
+            'Certificate file must be a PDF or an image (JPEG, PNG, or WEBP).'
+        )
+
+    def validate(self, data):
+        # At least one of URL or file must be present (after considering existing instance)
+        url = data.get('certificate_url')
+        file = data.get('certificate_file')
+        if self.instance:
+            url = url if 'certificate_url' in data else self.instance.certificate_url
+            file = file if 'certificate_file' in data else self.instance.certificate_file
+        if not url and not file:
+            raise serializers.ValidationError({
+                'non_field_errors': [
+                    'You must provide either a certificate URL or upload a certificate file (PDF or image).'
+                ]
+            })
+        return data
 
 
 class PointsWalletSerializer(serializers.ModelSerializer):

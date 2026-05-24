@@ -3,7 +3,7 @@ import re
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.contrib.contenttypes.fields import GenericRelation
-from django.core.validators import RegexValidator, MinLengthValidator, MaxLengthValidator, URLValidator
+from django.core.validators import RegexValidator, MinLengthValidator, MaxLengthValidator
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 
@@ -356,10 +356,19 @@ class Certificate(models.Model):
     certificate_url = models.URLField(
         _('certificate URL'),
         max_length=500,
-        validators=[URLValidator()],
-        help_text="URL link to the certificate (external link)"
+        blank=True,
+        null=True,
+        help_text="External URL link to the certificate (optional if a file is uploaded)"
     )
-    
+
+    certificate_file = models.FileField(
+        _('certificate file'),
+        upload_to='certificates/%Y/%m/',
+        blank=True,
+        null=True,
+        help_text="Uploaded certificate file (PDF or image, optional if URL provided)"
+    )
+
     class Meta:
         db_table = 'certificates'
         verbose_name = _('certificate')

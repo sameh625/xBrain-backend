@@ -1128,9 +1128,10 @@ class PostDislikeView(_PostReactionToggleView):
 
 class MyCertificatesListCreateView(generics.ListCreateAPIView):
     """GET /api/users/me/certificates/  — my certificates.
-    POST /api/users/me/certificates/ — add a new certificate."""
+    POST /api/users/me/certificates/ — add a new certificate (URL or file)."""
     permission_classes = [IsAuthenticated]
     serializer_class = CertificateSerializer
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_queryset(self):
         return Certificate.objects.filter(user=self.request.user).order_by('-issue_date')
@@ -1152,11 +1153,19 @@ class MyCertificatesListCreateView(generics.ListCreateAPIView):
         tags=['Users'],
         operation_id='users_07_my_certificate_create',
         summary="Add a certificate",
-        description="Authenticated users only. The owning user is taken from the request — never accepted from the client body.",
-        request=CertificateSerializer,
+        description=(
+            "Authenticated users only. Provide at least one of `certificate_url` "
+            "(external link) or `certificate_file` (PDF or image upload). Both are allowed. "
+            "Use application/json for URL-only certificates; use multipart/form-data when "
+            "uploading a file. The owning user is taken from the request — never from the body."
+        ),
+        request={
+            'application/json': CertificateSerializer,
+            'multipart/form-data': CertificateSerializer,
+        },
         responses={
             201: CertificateSerializer,
-            400: OpenApiResponse(description="Validation error (e.g., bad URL)."),
+            400: OpenApiResponse(description="Validation error (e.g., missing both URL and file, file too large, unsupported file type)."),
             401: OpenApiResponse(description="Authentication required."),
         },
     )

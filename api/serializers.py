@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from .models import (
     User, Specialization, Certificate, PointsWallet,
     Question, Answer, Attachment, Post, PostReaction, Comment,
+    MeetingRequest,
 )
 from .utils import (
     validate_password_strength,
@@ -1068,3 +1069,122 @@ class CommentUpdateSerializer(serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Content cannot be empty.")
         return value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meeting Requests (Google Meet for Q&A live explanations)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MeetingRequestCreateSerializer(serializers.ModelSerializer):
+    """Asker submits 1–5 proposed time slots + optional message + duration.
+
+    POST /api/answers/{id}/request-meeting/
+    Validates that all proposed slots are in the future, within MAX_LEAD_DAYS,
+    and at least MIN_LEAD_HOURS from now. The asker and answerer are set by
+    the view from URL + request.user, never from the request body.
+    """
+
+    class Meta:
+        model = MeetingRequest
+        fields = ['duration_minutes', 'proposed_slots', 'message']
+
+    def validate_proposed_slots(self, value):
+        from django.conf import settings as dj_settings
+        from django.utils import timezone
+
+        if not value or len(value) < 1:
+            raise serializers.ValidationError("At least one proposed time slot is required.")
+        max_slots = getattr(dj_settings, 'MEETING_MAX_PROPOSED_SLOTS', 5)
+        if len(value) > max_slots:
+            raise serializers.ValidationError(f"You may propose at most {max_slots} time slots.")
+
+        min_lead = getattr(dj_settings, 'MEETING_MIN_LEAD_HOURS', 1)
+        max_lead = getattr(dj_settings, 'MEETING_MAX_LEAD_DAYS', 30)
+        now = timezone.now()
+        earliest = now + timezone.timedelta(hours=min_lead)
+        latest = now + timezone.timedelta(days=max_lead)
+
+        cleaned = []
+        seen = set()
+        for slot in value:
+            if slot.tzinfo is None:
+                raise serializers.ValidationError("Proposed slots must include a timezone.")
+            if slot < earliest:
+                raise serializers.ValidationError(
+                    f"All proposed slots must be at least {min_lead} hour(s) from now."
+                )
+            if slot > latest:
+                raise serializers.ValidationError(
+                    f"Proposed slots cannot be more than {max_lead} days in the future."
+                )
+            iso = slot.isoformat()
+            if iso in seen:
+                continue  # silently drop duplicates
+            seen.add(iso)
+            cleaned.append(slot)
+
+        # Sort ascending for consistent display
+        cleaned.sort()
+        return cleaned
+
+
+class MeetingRequestAcceptSerializer(serializers.Serializer):
+    """Answerer picks ONE of the asker's proposed slots.
+
+    POST /api/meeting-requests/{id}/accept/
+    The view ensures the chosen slot is among the original proposed_slots.
+    """
+    scheduled_at = serializers.DateTimeField(
+        required=True,
+        help_text="Must be one of the originally proposed slots.",
+    )
+
+
+class MeetingRequestDeclineSerializer(serializers.Serializer):
+    """Answerer declines all proposed slots, optionally with a short message.
+
+    POST /api/meeting-requests/{id}/decline/
+    """
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        default='',
+    )
+
+
+class MeetingRequestSerializer(serializers.ModelSerializer):
+    """Read serializer used by detail + list endpoints (both outgoing & incoming).
+
+    Hides google_event_id (internal bookkeeping only) but exposes the meet_link
+    once the meeting is scheduled.
+    """
+    asker = PublicAuthorSerializer(read_only=True)
+    answerer = PublicAuthorSerializer(read_only=True)
+    answer_id = serializers.UUIDField(source='answer.id', read_only=True)
+    question_id = serializers.UUIDField(source='answer.question.id', read_only=True)
+    question_preview = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MeetingRequest
+        fields = [
+            'id',
+            'asker',
+            'answerer',
+            'answer_id',
+            'question_id',
+            'question_preview',
+            'message',
+            'duration_minutes',
+            'proposed_slots',
+            'scheduled_at',
+            'meet_link',
+            'decline_message',
+            'status',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_question_preview(self, obj) -> str:
+        return obj.answer.question.content[:120]

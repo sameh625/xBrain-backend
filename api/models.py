@@ -3,6 +3,7 @@ import re
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.contrib.contenttypes.fields import GenericRelation
+from django.contrib.postgres.fields import ArrayField
 from django.core.validators import RegexValidator, MinLengthValidator, MaxLengthValidator
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
@@ -634,3 +635,99 @@ class Comment(models.Model):
     def __str__(self):
         kind = "Reply" if self.parent_comment_id else "Comment"
         return f"{kind} by {self.author.username} on Post {self.post_id}"
+
+
+class MeetingRequest(models.Model):
+    """A request from a question's author (asker) to one of its answer authors
+    (answerer) for a live Google Meet call to explain the answer.
+
+    Flow:
+      1. Asker proposes 1-5 time slots (from a calendar in the Flutter app).
+      2. Answerer either picks ONE slot (=> scheduled) or declines.
+      3. On acceptance, the backend creates a Google Calendar event with an
+         auto-generated Meet link. Both parties receive an email + calendar invite.
+    """
+
+    STATUS_PENDING   = 'pending'
+    STATUS_SCHEDULED = 'scheduled'
+    STATUS_DECLINED  = 'declined'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_PENDING,   'Pending answerer response'),
+        (STATUS_SCHEDULED, 'Scheduled'),
+        (STATUS_DECLINED,  'Declined'),
+        (STATUS_CANCELLED, 'Cancelled by asker'),
+    ]
+
+    DURATION_CHOICES = [
+        (15, '15 minutes'),
+        (30, '30 minutes'),
+        (45, '45 minutes'),
+        (60, '60 minutes'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    answer = models.ForeignKey(
+        'Answer',
+        on_delete=models.CASCADE,
+        related_name='meeting_requests',
+    )
+    asker = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='meeting_requests_sent',
+    )
+    answerer = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='meeting_requests_received',
+    )
+
+    message = models.TextField(blank=True, max_length=1000)
+    duration_minutes = models.PositiveSmallIntegerField(
+        choices=DURATION_CHOICES,
+        default=30,
+    )
+    proposed_slots = ArrayField(
+        models.DateTimeField(),
+        size=5,
+        help_text="Up to 5 datetime slots proposed by the asker (UTC).",
+    )
+
+    # Populated when answerer accepts:
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    meet_link = models.URLField(blank=True, max_length=500)
+    google_event_id = models.CharField(max_length=255, blank=True)
+
+    # Populated when answerer declines:
+    decline_message = models.TextField(blank=True, max_length=500)
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'meeting_requests'
+        ordering = ['-created_at']
+        constraints = [
+            # One pending/scheduled request per (asker, answer). Cancelled/declined
+            # requests don't block re-requesting later — they're terminal states.
+            models.UniqueConstraint(
+                fields=['answer', 'asker'],
+                condition=models.Q(status__in=['pending', 'scheduled']),
+                name='uniq_active_meeting_per_asker_per_answer',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['asker', '-created_at'], name='idx_mr_asker_created'),
+            models.Index(fields=['answerer', '-created_at'], name='idx_mr_answerer_created'),
+            models.Index(fields=['status'], name='idx_mr_status'),
+        ]
+
+    def __str__(self):
+        return f"MeetingRequest({self.status}) by {self.asker.username} → {self.answerer.username}"

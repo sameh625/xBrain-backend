@@ -302,12 +302,162 @@ The xBrain Team
 def send_reset_otp_and_store(email, first_name=None):
     otp = generate_otp(getattr(settings, 'OTP_LENGTH', 6))
     validity = 10  # 10 minutes validity for reset OTP
-    
+
     cache_key = f'reset_otp_{email}'
     cache.set(cache_key, otp, timeout=validity * 60)
-    
+
     email_sent = send_password_reset_email(email, otp, first_name)
     if not email_sent:
         print(f"[WARNING] Reset Email could not be sent to {email}.")
-    
+
     return True, otp, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meeting Request notification emails
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_dt(dt):
+    """Format a UTC datetime as a human-readable string."""
+    return dt.strftime('%A, %B %d, %Y at %H:%M UTC')
+
+
+def send_meeting_request_created_email(meeting_request):
+    """Notify the answerer that they have a new meeting request."""
+    mr = meeting_request
+    slots_lines = '\n'.join(f'  • {_fmt_dt(s)}' for s in mr.proposed_slots)
+    asker_name = f"{mr.asker.first_name} {mr.asker.last_name}".strip() or mr.asker.username
+
+    subject = f'{asker_name} requested a meeting on your answer'
+    message = f"""Hi {mr.answerer.first_name or mr.answerer.username},
+
+{asker_name} would like to schedule a {mr.duration_minutes}-minute video call to discuss your answer on this question:
+
+  "{mr.answer.question.content[:200]}"
+
+Proposed times:
+{slots_lines}
+
+{f"Message: {mr.message}" if mr.message else ""}
+
+Open the xBrain app to accept one of these times or decline.
+
+Best regards,
+The xBrain Team
+"""
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[mr.answerer.email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Error sending meeting request email: {e}")
+        return False
+
+
+def send_meeting_scheduled_email(meeting_request):
+    """Notify BOTH parties that the meeting is confirmed."""
+    mr = meeting_request
+    asker_name = f"{mr.asker.first_name} {mr.asker.last_name}".strip() or mr.asker.username
+    answerer_name = f"{mr.answerer.first_name} {mr.answerer.last_name}".strip() or mr.answerer.username
+
+    subject = f'Meeting confirmed — {_fmt_dt(mr.scheduled_at)}'
+    message = f"""Hi {asker_name} and {answerer_name},
+
+Your meeting is confirmed.
+
+  Date & time:  {_fmt_dt(mr.scheduled_at)}
+  Duration:     {mr.duration_minutes} minutes
+  Question:     "{mr.answer.question.content[:200]}"
+
+Join here when it's time:
+  {mr.meet_link}
+
+A calendar invite has also been sent to both of you. The link works in any
+browser; no app required.
+
+{f"Asker's message: {mr.message}" if mr.message else ""}
+
+Best regards,
+The xBrain Team
+"""
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[mr.asker.email, mr.answerer.email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Error sending meeting scheduled email: {e}")
+        return False
+
+
+def send_meeting_declined_email(meeting_request):
+    """Notify the asker that their meeting request was declined."""
+    mr = meeting_request
+    answerer_name = f"{mr.answerer.first_name} {mr.answerer.last_name}".strip() or mr.answerer.username
+
+    subject = f'{answerer_name} declined your meeting request'
+    message = f"""Hi {mr.asker.first_name or mr.asker.username},
+
+{answerer_name} declined your meeting request on the following question:
+
+  "{mr.answer.question.content[:200]}"
+
+{f'Their message: "{mr.decline_message}"' if mr.decline_message else 'No additional message was provided.'}
+
+You can try again with different time slots from the xBrain app.
+
+Best regards,
+The xBrain Team
+"""
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[mr.asker.email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Error sending meeting declined email: {e}")
+        return False
+
+
+def send_meeting_cancelled_email(meeting_request):
+    """Notify the answerer that the asker cancelled."""
+    mr = meeting_request
+    asker_name = f"{mr.asker.first_name} {mr.asker.last_name}".strip() or mr.asker.username
+
+    subject = f'{asker_name} cancelled the meeting request'
+    message = f"""Hi {mr.answerer.first_name or mr.answerer.username},
+
+{asker_name} cancelled their meeting request about the following question:
+
+  "{mr.answer.question.content[:200]}"
+
+No further action is needed.
+
+Best regards,
+The xBrain Team
+"""
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[mr.answerer.email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Error sending meeting cancelled email: {e}")
+        return False

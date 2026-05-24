@@ -62,3 +62,6 @@ Sprint_Report.pdf
 PRODUCTION_ENV_VARS_TO_COPY.txt
 
 docs/
+
+scripts/client_secret.json
+scripts/google_credentials.env

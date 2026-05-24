@@ -42,10 +42,15 @@ from .serializers import (
     CertificateSerializer,
     PublicUserProfileSerializer,
     SpecializationCompactSerializer,
+    MeetingRequestSerializer,
+    MeetingRequestCreateSerializer,
+    MeetingRequestAcceptSerializer,
+    MeetingRequestDeclineSerializer,
 )
 from .models import (
     User, Specialization, UserSpecialization,
     Question, Answer, Post, PostReaction, Comment, Certificate,
+    MeetingRequest,
 )
 from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor, IsCommentDeletable
 
@@ -1547,3 +1552,356 @@ class CommentReplyListCreateView(generics.ListCreateAPIView):
     )
     def post(self, request, *args, **kwargs):
         return super().post(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meeting Requests — Google Meet for Q&A live explanations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _meeting_queryset():
+    """Optimized queryset for meeting list/detail views (avoids N+1)."""
+    return (
+        MeetingRequest.objects
+        .select_related('asker', 'answerer', 'answer__question')
+    )
+
+
+class RequestMeetingView(APIView):
+    """POST /api/answers/{id}/request-meeting/ — asker asks for a live meeting.
+
+    Only the original question's author (the asker) can request a meeting on
+    an answer to their question.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestCreateSerializer
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_01_request',
+        summary="Request a live meeting on an answer",
+        description=(
+            "The question's author proposes 1–5 time slots to the answerer. "
+            "Only the question's author may call this. One active request per "
+            "(asker, answer) at a time."
+        ),
+        request=MeetingRequestCreateSerializer,
+        responses={
+            201: MeetingRequestSerializer,
+            400: OpenApiResponse(description="Validation error or duplicate active request."),
+            403: OpenApiResponse(description="Only the question's author may request a meeting."),
+            404: OpenApiResponse(description="Answer not found."),
+        },
+    )
+    def post(self, request, pk):
+        answer = get_object_or_404(
+            Answer.objects.select_related('question__author', 'author'),
+            pk=pk,
+        )
+
+        # Permission: only the question's author can request meetings on its answers.
+        if answer.question.author_id != request.user.id:
+            raise PermissionDenied(
+                "Only the question's author may request a meeting on its answers."
+            )
+
+        # Sanity: can't request a meeting from yourself.
+        if answer.author_id == request.user.id:
+            raise DRFValidationError("You cannot request a meeting on your own answer.")
+
+        # Refuse if an active (pending or scheduled) request already exists.
+        existing = MeetingRequest.objects.filter(
+            answer=answer,
+            asker=request.user,
+            status__in=[MeetingRequest.STATUS_PENDING, MeetingRequest.STATUS_SCHEDULED],
+        ).first()
+        if existing:
+            raise DRFValidationError(
+                "An active meeting request already exists for this answer. "
+                "Cancel it before creating a new one."
+            )
+
+        serializer = MeetingRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        meeting_request = MeetingRequest.objects.create(
+            answer=answer,
+            asker=request.user,
+            answerer=answer.author,
+            duration_minutes=serializer.validated_data['duration_minutes'],
+            proposed_slots=serializer.validated_data['proposed_slots'],
+            message=serializer.validated_data.get('message', ''),
+            status=MeetingRequest.STATUS_PENDING,
+        )
+
+        # Notify the answerer (failure is logged but doesn't block creation).
+        from .utils import send_meeting_request_created_email
+        send_meeting_request_created_email(meeting_request)
+
+        return Response(
+            MeetingRequestSerializer(meeting_request).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AcceptMeetingView(APIView):
+    """POST /api/meeting-requests/{id}/accept/ — answerer picks one of the slots.
+
+    Backend creates a Google Calendar event with an auto-generated Meet link
+    and notifies both parties via email.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestAcceptSerializer
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_02_accept',
+        summary="Accept one of the proposed slots",
+        description=(
+            "Only the answerer can call this. The chosen slot must be one of "
+            "the originally proposed datetimes. On success, the backend creates "
+            "a Google Calendar event with an auto-generated Meet link and emails "
+            "both parties."
+        ),
+        request=MeetingRequestAcceptSerializer,
+        responses={
+            200: MeetingRequestSerializer,
+            400: OpenApiResponse(description="Slot not in proposed list, or request not in pending state."),
+            403: OpenApiResponse(description="Only the answerer may accept."),
+            404: OpenApiResponse(description="Meeting request not found."),
+            502: OpenApiResponse(description="Failed to create the Google Meet link."),
+        },
+    )
+    def post(self, request, pk):
+        meeting_request = get_object_or_404(_meeting_queryset(), pk=pk)
+
+        if meeting_request.answerer_id != request.user.id:
+            raise PermissionDenied("Only the answerer may accept this meeting request.")
+        if meeting_request.status != MeetingRequest.STATUS_PENDING:
+            raise DRFValidationError(
+                f"Cannot accept — meeting request is already {meeting_request.status}."
+            )
+
+        serializer = MeetingRequestAcceptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        chosen_slot = serializer.validated_data['scheduled_at']
+
+        # Chosen slot must be one of the originally proposed ones (exact match).
+        proposed_iso = {s.isoformat() for s in meeting_request.proposed_slots}
+        if chosen_slot.isoformat() not in proposed_iso:
+            raise DRFValidationError({
+                'scheduled_at': ['Chosen slot must be one of the originally proposed slots.']
+            })
+
+        # Create the Google Calendar event + Meet link.
+        from .google_meet import create_meet_event, GoogleMeetError
+        from .utils import send_meeting_scheduled_email
+
+        asker_name = f"{meeting_request.asker.first_name} {meeting_request.asker.last_name}".strip() \
+                     or meeting_request.asker.username
+        answerer_name = f"{meeting_request.answerer.first_name} {meeting_request.answerer.last_name}".strip() \
+                        or meeting_request.answerer.username
+        summary = f"xBrain — {asker_name} & {answerer_name}"
+        description = (
+            f"Live discussion of the following xBrain question:\n\n"
+            f"\"{meeting_request.answer.question.content[:500]}\"\n\n"
+            f"{'Asker message: ' + meeting_request.message if meeting_request.message else ''}"
+        )
+
+        try:
+            meet_link, event_id = create_meet_event(
+                summary=summary,
+                description=description,
+                starts_at=chosen_slot,
+                duration_minutes=meeting_request.duration_minutes,
+                attendee_emails=[
+                    meeting_request.asker.email,
+                    meeting_request.answerer.email,
+                ],
+            )
+        except GoogleMeetError as e:
+            return Response(
+                {'error': f'Failed to create Google Meet event: {e}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        with transaction.atomic():
+            meeting_request.scheduled_at = chosen_slot
+            meeting_request.meet_link = meet_link
+            meeting_request.google_event_id = event_id
+            meeting_request.status = MeetingRequest.STATUS_SCHEDULED
+            meeting_request.save(update_fields=[
+                'scheduled_at', 'meet_link', 'google_event_id', 'status', 'updated_at',
+            ])
+
+        send_meeting_scheduled_email(meeting_request)
+
+        return Response(
+            MeetingRequestSerializer(meeting_request).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class DeclineMeetingView(APIView):
+    """POST /api/meeting-requests/{id}/decline/ — answerer declines all slots."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestDeclineSerializer
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_03_decline',
+        summary="Decline a meeting request",
+        description="Only the answerer can call this. Optional short message to the asker.",
+        request=MeetingRequestDeclineSerializer,
+        responses={
+            200: MeetingRequestSerializer,
+            400: OpenApiResponse(description="Request is not in pending state."),
+            403: OpenApiResponse(description="Only the answerer may decline."),
+            404: OpenApiResponse(description="Meeting request not found."),
+        },
+    )
+    def post(self, request, pk):
+        meeting_request = get_object_or_404(_meeting_queryset(), pk=pk)
+
+        if meeting_request.answerer_id != request.user.id:
+            raise PermissionDenied("Only the answerer may decline this meeting request.")
+        if meeting_request.status != MeetingRequest.STATUS_PENDING:
+            raise DRFValidationError(
+                f"Cannot decline — meeting request is already {meeting_request.status}."
+            )
+
+        serializer = MeetingRequestDeclineSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        meeting_request.status = MeetingRequest.STATUS_DECLINED
+        meeting_request.decline_message = serializer.validated_data.get('message', '')
+        meeting_request.save(update_fields=['status', 'decline_message', 'updated_at'])
+
+        from .utils import send_meeting_declined_email
+        send_meeting_declined_email(meeting_request)
+
+        return Response(
+            MeetingRequestSerializer(meeting_request).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class CancelMeetingView(APIView):
+    """POST /api/meeting-requests/{id}/cancel/ — asker cancels their own request.
+
+    If the meeting was already scheduled, the associated Google Calendar
+    event is also cancelled.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_04_cancel',
+        summary="Cancel a meeting request",
+        description=(
+            "Only the asker can cancel. If the meeting was already scheduled, "
+            "the associated Google Calendar event is also cancelled and both "
+            "parties get an email."
+        ),
+        request=None,
+        responses={
+            200: MeetingRequestSerializer,
+            400: OpenApiResponse(description="Request is already declined or cancelled."),
+            403: OpenApiResponse(description="Only the asker may cancel."),
+            404: OpenApiResponse(description="Meeting request not found."),
+        },
+    )
+    def post(self, request, pk):
+        meeting_request = get_object_or_404(_meeting_queryset(), pk=pk)
+
+        if meeting_request.asker_id != request.user.id:
+            raise PermissionDenied("Only the asker may cancel this meeting request.")
+        if meeting_request.status in (MeetingRequest.STATUS_DECLINED, MeetingRequest.STATUS_CANCELLED):
+            raise DRFValidationError(
+                f"Cannot cancel — meeting request is already {meeting_request.status}."
+            )
+
+        # If already scheduled, also cancel the Google Calendar event.
+        if meeting_request.status == MeetingRequest.STATUS_SCHEDULED and meeting_request.google_event_id:
+            from .google_meet import cancel_meet_event
+            cancel_meet_event(meeting_request.google_event_id)
+
+        meeting_request.status = MeetingRequest.STATUS_CANCELLED
+        meeting_request.save(update_fields=['status', 'updated_at'])
+
+        from .utils import send_meeting_cancelled_email
+        send_meeting_cancelled_email(meeting_request)
+
+        return Response(
+            MeetingRequestSerializer(meeting_request).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class MyOutgoingMeetingRequestsView(generics.ListAPIView):
+    """GET /api/users/me/meeting-requests/outgoing/ — requests I sent (I'm the asker)."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestSerializer
+
+    def get_queryset(self):
+        return (
+            _meeting_queryset()
+            .filter(asker=self.request.user)
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_05_outgoing',
+        summary="List meeting requests I sent",
+        description="Paginated list of meeting requests where I am the asker. Newest first.",
+        responses={200: MeetingRequestSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class MyIncomingMeetingRequestsView(generics.ListAPIView):
+    """GET /api/users/me/meeting-requests/incoming/ — requests sent to me (I'm the answerer)."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestSerializer
+
+    def get_queryset(self):
+        return (
+            _meeting_queryset()
+            .filter(answerer=self.request.user)
+            .order_by('-created_at')
+        )
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_06_incoming',
+        summary="List meeting requests sent to me",
+        description="Paginated list of meeting requests where I am the answerer. Newest first.",
+        responses={200: MeetingRequestSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
+class MeetingRequestDetailView(generics.RetrieveAPIView):
+    """GET /api/meeting-requests/{id}/ — detail. Only the asker or answerer may view."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeetingRequestSerializer
+
+    def get_queryset(self):
+        return _meeting_queryset().filter(
+            Q(asker=self.request.user) | Q(answerer=self.request.user)
+        )
+
+    @extend_schema(
+        tags=['Meetings'],
+        operation_id='meetings_07_detail',
+        summary="Get a meeting request's detail",
+        description="Only the asker or the answerer may view a meeting request.",
+        responses={
+            200: MeetingRequestSerializer,
+            404: OpenApiResponse(description="Meeting request not found, or you are neither the asker nor the answerer."),
+        },
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)

@@ -22,3 +22,6 @@ drf-spectacular==0.29.0
 django-storages[azure]==1.14.4
 
 redis==5.2.0
+
+google-api-python-client==2.139.0
+google-auth==2.34.0

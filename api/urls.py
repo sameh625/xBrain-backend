@@ -47,6 +47,13 @@ from .views import (
     UserQuestionsListView,
     UserProfileDetailView,
     UserPublicSpecializationsView,
+    RequestMeetingView,
+    AcceptMeetingView,
+    DeclineMeetingView,
+    CancelMeetingView,
+    MyOutgoingMeetingRequestsView,
+    MyIncomingMeetingRequestsView,
+    MeetingRequestDetailView,
 )
 
 app_name = 'api'
@@ -99,4 +106,13 @@ urlpatterns = [
     path('users/<uuid:user_id>/posts/', UserPostsListView.as_view(), name='user-posts'),
     path('users/<uuid:user_id>/questions/', UserQuestionsListView.as_view(), name='user-questions'),
     path('users/<uuid:user_id>/specializations/', UserPublicSpecializationsView.as_view(), name='user-specializations-public'),
+
+    # Meetings: Google Meet on Q&A answers
+    path('answers/<uuid:pk>/request-meeting/', RequestMeetingView.as_view(), name='request-meeting'),
+    path('meeting-requests/<uuid:pk>/accept/', AcceptMeetingView.as_view(), name='accept-meeting'),
+    path('meeting-requests/<uuid:pk>/decline/', DeclineMeetingView.as_view(), name='decline-meeting'),
+    path('meeting-requests/<uuid:pk>/cancel/', CancelMeetingView.as_view(), name='cancel-meeting'),
+    path('users/me/meeting-requests/outgoing/', MyOutgoingMeetingRequestsView.as_view(), name='my-meetings-outgoing'),
+    path('users/me/meeting-requests/incoming/', MyIncomingMeetingRequestsView.as_view(), name='my-meetings-incoming'),
+    path('meeting-requests/<uuid:pk>/', MeetingRequestDetailView.as_view(), name='meeting-request-detail'),
 ]

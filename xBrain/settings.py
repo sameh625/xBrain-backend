@@ -232,6 +232,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Specializations', 'description': 'Predefined areas of expertise.'},
         {'name': 'Q&A', 'description': 'Questions, answers, and replies.'},
         {'name': 'Posts', 'description': 'Knowledge-sharing posts with likes, dislikes, and (later) comments.'},
+        {'name': 'Meetings', 'description': 'Live Google Meet meeting requests on Q&A answers.'},
     ],
 }
 
@@ -318,3 +319,18 @@ OTP_MAX_RESEND_ATTEMPTS = config('OTP_MAX_RESEND_ATTEMPTS', default=3, cast=int)
 # Login Security Settings
 MAX_LOGIN_ATTEMPTS = config('MAX_LOGIN_ATTEMPTS', default=5, cast=int)
 LOGIN_LOCKOUT_MINUTES = config('LOGIN_LOCKOUT_MINUTES', default=15, cast=int)
+
+
+# Google Calendar / Meet integration
+# Used by api/google_meet.py to create real Google Meet links via the
+# Calendar API. Credentials belong to a single host account (xbrain Gmail)
+# obtained via the one-time OAuth flow in scripts/get_google_refresh_token.py.
+GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID', default='')
+GOOGLE_CLIENT_SECRET = config('GOOGLE_CLIENT_SECRET', default='')
+GOOGLE_REFRESH_TOKEN = config('GOOGLE_REFRESH_TOKEN', default='')
+GOOGLE_CALENDAR_ID = config('GOOGLE_CALENDAR_ID', default='primary')
+
+# Meeting Request settings
+MEETING_MAX_PROPOSED_SLOTS = config('MEETING_MAX_PROPOSED_SLOTS', default=10, cast=int)
+MEETING_MIN_LEAD_HOURS = config('MEETING_MIN_LEAD_HOURS', default=1, cast=int)
+MEETING_MAX_LEAD_DAYS = config('MEETING_MAX_LEAD_DAYS', default=30, cast=int)

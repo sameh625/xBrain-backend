@@ -233,8 +233,21 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Q&A', 'description': 'Questions, answers, and replies.'},
         {'name': 'Posts', 'description': 'Knowledge-sharing posts with likes, dislikes, and (later) comments.'},
         {'name': 'Meetings', 'description': 'Live Google Meet meeting requests on Q&A answers.'},
+        {'name': 'AI Chat', 'description': 'Chat sessions backed by the standalone AI service (Agentic RAG + Memory).'},
     ],
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI service (graduation_project / FastAPI) — Django talks to it over HTTP.
+#   AI_SERVICE_URL: full base URL incl. scheme & port, no trailing slash.
+#   AI_REQUEST_TIMEOUT: socket timeout for non-streaming calls (seconds).
+#   AI_STREAM_TIMEOUT: longer ceiling for streaming /ask (seconds).
+# Override in production via App Service Configuration.
+# ─────────────────────────────────────────────────────────────────────────────
+AI_SERVICE_URL = config('AI_SERVICE_URL', default='http://localhost:7860')
+AI_REQUEST_TIMEOUT = config('AI_REQUEST_TIMEOUT', default=60, cast=int)
+AI_STREAM_TIMEOUT = config('AI_STREAM_TIMEOUT', default=300, cast=int)
 
 
 from datetime import timedelta

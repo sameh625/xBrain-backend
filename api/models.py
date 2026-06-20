@@ -835,3 +835,37 @@ class SeenQuestion(models.Model):
         indexes = [
             models.Index(fields=['user', 'question'], name='idx_seenq_user_question'),
         ]
+
+
+class ChatSession(models.Model):
+    """Per-user index of AI chat sessions (ChatGPT-style sidebar).
+
+    The id doubles as the `session_id` we hand to the standalone AI service —
+    one source of truth for both. Conversation messages themselves live in the
+    AI's Chroma store (we don't duplicate them here); this row exists only so
+    Flutter can list, rename, and delete the user's chats.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='chat_sessions',
+    )
+    title = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="Auto-derived from the first message; user can rename.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_message_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'chat_sessions'
+        ordering = ['-last_message_at']
+        indexes = [
+            models.Index(fields=['user', '-last_message_at'], name='idx_chat_user_last_msg'),
+        ]
+
+    def __str__(self):
+        return f"Chat({self.user.username}, {self.title or '(untitled)'})"

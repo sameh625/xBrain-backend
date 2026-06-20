@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from .models import (
     User, Specialization, Certificate, PointsWallet,
     Question, Answer, Attachment, Post, PostReaction, Comment,
-    MeetingRequest,
+    MeetingRequest, ChatSession,
 )
 from .utils import (
     validate_password_strength,
@@ -1248,3 +1248,46 @@ class SeenQuestionsInSerializer(serializers.Serializer):
         max_length=MAX_SEEN_IDS_PER_REQUEST,
         help_text=f"UUIDs of questions the client has rendered (max {MAX_SEEN_IDS_PER_REQUEST}).",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Chat — thin per-user index of chat sessions backed by the AI service
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ChatSessionSerializer(serializers.ModelSerializer):
+    """Read shape for a chat row. Conversation messages live in the AI service —
+    fetch them via GET /api/ai/chats/{id}/."""
+
+    class Meta:
+        model = ChatSession
+        fields = ['id', 'title', 'created_at', 'last_message_at']
+        read_only_fields = fields
+
+
+class ChatSessionCreateSerializer(serializers.Serializer):
+    """POST /api/ai/chats/ body. Title is optional — it'll be auto-derived
+    from the first question if you leave it blank."""
+    title = serializers.CharField(
+        required=False, allow_blank=True, max_length=120, default='',
+    )
+
+
+class ChatSessionRenameSerializer(serializers.Serializer):
+    """PATCH /api/ai/chats/{id}/ body. Rename a chat."""
+    title = serializers.CharField(required=True, max_length=120)
+
+    def validate_title(self, value):
+        v = value.strip()
+        if not v:
+            raise serializers.ValidationError("Title cannot be empty.")
+        return v
+
+
+class AIAskInSerializer(serializers.Serializer):
+    """POST /api/ai/chats/{id}/ask/ body. `stream` defaults to true so Flutter
+    gets typing-style output without having to opt in."""
+    question = serializers.CharField(
+        min_length=1, max_length=4000, trim_whitespace=True,
+    )
+    stream = serializers.BooleanField(required=False, default=True)

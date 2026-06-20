@@ -56,6 +56,9 @@ from .views import (
     MyOutgoingMeetingRequestsView,
     MyIncomingMeetingRequestsView,
     MeetingRequestDetailView,
+    ChatSessionListCreateView,
+    ChatSessionDetailView,
+    AIAskView,
 )
 
 app_name = 'api'
@@ -119,4 +122,9 @@ urlpatterns = [
     path('users/me/meeting-requests/outgoing/', MyOutgoingMeetingRequestsView.as_view(), name='my-meetings-outgoing'),
     path('users/me/meeting-requests/incoming/', MyIncomingMeetingRequestsView.as_view(), name='my-meetings-incoming'),
     path('meeting-requests/<uuid:pk>/', MeetingRequestDetailView.as_view(), name='meeting-request-detail'),
+
+    # AI Chat — proxies the standalone FastAPI service. Streaming on /ask.
+    path('ai/chats/', ChatSessionListCreateView.as_view(), name='ai-chats'),
+    path('ai/chats/<uuid:pk>/', ChatSessionDetailView.as_view(), name='ai-chat-detail'),
+    path('ai/chats/<uuid:pk>/ask/', AIAskView.as_view(), name='ai-chat-ask'),
 ]

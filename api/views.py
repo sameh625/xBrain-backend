@@ -1,3 +1,4 @@
+import httpx
 from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -48,11 +49,15 @@ from .serializers import (
     MeetingRequestDeclineSerializer,
     SeenPostsInSerializer,
     SeenQuestionsInSerializer,
+    ChatSessionSerializer,
+    ChatSessionCreateSerializer,
+    ChatSessionRenameSerializer,
+    AIAskInSerializer,
 )
 from .models import (
     User, Specialization, UserSpecialization,
     Question, Answer, Post, PostReaction, Comment, Certificate,
-    MeetingRequest, SeenPost, SeenQuestion, PointsWallet,
+    MeetingRequest, SeenPost, SeenQuestion, PointsWallet, ChatSession,
 )
 from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor, IsCommentDeletable
 
@@ -2174,3 +2179,282 @@ class MeetingRequestDetailView(generics.RetrieveAPIView):
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AI Chat (Sprint 5) — Django proxies to the standalone FastAPI AI service.
+#
+# The AI service is treated as a black box reachable at settings.AI_SERVICE_URL.
+# Django keeps a per-user ChatSession index so Flutter can render a sidebar of
+# chats; conversation messages live in the AI's Chroma store, not here.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _ai_url(path):
+    """Compose an absolute URL onto the configured AI service. `path` must
+    start with a leading slash."""
+    from django.conf import settings
+    base = settings.AI_SERVICE_URL.rstrip('/')
+    return f"{base}{path}"
+
+
+class ChatSessionListCreateView(generics.ListCreateAPIView):
+    """GET /api/ai/chats/ — paginated list of MY chats, newest activity first.
+    POST /api/ai/chats/ — start a new chat (optional `title` in body)."""
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return ChatSessionCreateSerializer
+        return ChatSessionSerializer
+
+    def get_queryset(self):
+        return ChatSession.objects.filter(user=self.request.user)
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_01_chats_list',
+        summary="List my chats (sidebar)",
+        description="Paginated list of the current user's chat sessions, ordered by most recent activity.",
+        responses={200: ChatSessionSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_02_chat_create',
+        summary="Start a new chat",
+        description=(
+            "Creates a new chat session and returns its UUID. The UUID doubles "
+            "as the `session_id` the AI service uses internally. If `title` is "
+            "omitted, the first question's leading text becomes the title."
+        ),
+        request=ChatSessionCreateSerializer,
+        responses={
+            201: ChatSessionSerializer,
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = ChatSessionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        chat = ChatSession.objects.create(
+            user=request.user,
+            title=serializer.validated_data.get('title', '') or '',
+        )
+        return Response(
+            ChatSessionSerializer(chat).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ChatSessionDetailView(APIView):
+    """GET / PATCH / DELETE /api/ai/chats/{id}/.
+
+    GET returns the chat row PLUS the conversation history fetched live from
+    the AI service. PATCH renames (Django-only). DELETE removes the Django row
+    and best-effort deletes the AI's Chroma rows."""
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_owned(self, request, pk):
+        """Fetch a chat that belongs to the current user, or 404. Never 403 —
+        we don't want to leak whether a chat exists under someone else."""
+        return get_object_or_404(ChatSession, pk=pk, user=request.user)
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_03_chat_detail',
+        summary="Get a chat's detail (including the conversation history)",
+        description=(
+            "Returns the chat row plus the conversation history fetched live "
+            "from the AI service. If the AI service is unreachable, the chat "
+            "row is still returned but `history` will be `null`."
+        ),
+        responses={
+            200: OpenApiResponse(description="Chat row plus AI-side history."),
+            404: OpenApiResponse(description="Chat not found (or not yours)."),
+        },
+    )
+    def get(self, request, pk):
+        import httpx
+        from django.conf import settings
+        chat = self._get_owned(request, pk)
+        history = None
+        history_error = None
+        try:
+            with httpx.Client(timeout=settings.AI_REQUEST_TIMEOUT) as client:
+                resp = client.get(_ai_url(f'/session/{chat.id}/history'))
+                if resp.status_code == 200:
+                    history = resp.json()
+                elif resp.status_code == 404:
+                    # AI hasn't seen this session yet — empty history is fine.
+                    history = None
+                else:
+                    history_error = f"upstream returned {resp.status_code}"
+        except httpx.HTTPError as e:
+            history_error = f"upstream unreachable: {e.__class__.__name__}"
+
+        payload = ChatSessionSerializer(chat).data
+        payload['history'] = history
+        if history_error:
+            payload['history_error'] = history_error
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_04_chat_rename',
+        summary="Rename a chat",
+        request=ChatSessionRenameSerializer,
+        responses={
+            200: ChatSessionSerializer,
+            400: OpenApiResponse(description="Validation error."),
+            404: OpenApiResponse(description="Chat not found (or not yours)."),
+        },
+    )
+    def patch(self, request, pk):
+        chat = self._get_owned(request, pk)
+        serializer = ChatSessionRenameSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        chat.title = serializer.validated_data['title']
+        chat.save(update_fields=['title', 'last_message_at'])
+        return Response(ChatSessionSerializer(chat).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_05_chat_delete',
+        summary="Delete a chat (and its AI-side history, best-effort)",
+        description=(
+            "Removes the Django chat row. Also fires a best-effort "
+            "`DELETE /session/{id}` against the AI service to release Chroma "
+            "rows; Django-side deletion succeeds even if the AI is "
+            "unreachable, so the chat doesn't reappear in the sidebar."
+        ),
+        responses={
+            204: OpenApiResponse(description="Deleted."),
+            404: OpenApiResponse(description="Chat not found (or not yours)."),
+        },
+    )
+    def delete(self, request, pk):
+        import httpx
+        from django.conf import settings
+        chat = self._get_owned(request, pk)
+        chat_id = str(chat.id)
+        chat.delete()
+        # Best-effort cleanup on the AI side — never block Django deletion.
+        try:
+            with httpx.Client(timeout=settings.AI_REQUEST_TIMEOUT) as client:
+                client.delete(_ai_url(f'/session/{chat_id}'))
+        except httpx.HTTPError:
+            pass
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AIAskView(APIView):
+    """POST /api/ai/chats/{id}/ask/ — proxy a chat question to the AI service.
+
+    Streams the upstream response back to the client unchanged. On first chunk
+    we bump `last_message_at` and (if the chat has no title yet) derive one
+    from the first question."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = AIAskInSerializer
+
+    @extend_schema(
+        tags=['AI Chat'],
+        operation_id='ai_06_chat_ask',
+        summary="Send a question to the AI and stream the reply back",
+        description=(
+            "Forwards the question to the AI's `/ask` endpoint with the "
+            "Django user's UUID as `user_id` and the chat's UUID as "
+            "`session_id`. The response body streams the AI's reply through "
+            "(token-by-token by default). The AI's native format includes "
+            "two literal markers Flutter must parse: a `\\n__ANSWER_DONE__` "
+            "line ends the answer text, followed by `\\n__METADATA__` and a "
+            "single JSON line with sources, book titles, and suggestions."
+        ),
+        request=AIAskInSerializer,
+        responses={
+            200: OpenApiResponse(description="Streamed text/event-stream of the AI's reply."),
+            400: OpenApiResponse(description="Validation error."),
+            404: OpenApiResponse(description="Chat not found (or not yours)."),
+            502: OpenApiResponse(description="AI service returned an error."),
+            504: OpenApiResponse(description="AI service timed out."),
+        },
+    )
+    def post(self, request, pk):
+        import httpx
+        from django.conf import settings
+        from django.http import StreamingHttpResponse
+
+        chat = get_object_or_404(ChatSession, pk=pk, user=request.user)
+        serializer = AIAskInSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question = serializer.validated_data['question']
+        stream_enabled = serializer.validated_data.get('stream', True)
+
+        # Bump activity timestamp and auto-title on the first message.
+        update_fields = ['last_message_at']
+        if not chat.title:
+            chat.title = question[:60].strip() or 'New chat'
+            update_fields.append('title')
+        chat.save(update_fields=update_fields)
+
+        body = {
+            'question': question,
+            'session_id': str(chat.id),
+            'user_id': str(request.user.id),
+            'stream': stream_enabled,
+        }
+
+        if not stream_enabled:
+            try:
+                with httpx.Client(timeout=settings.AI_REQUEST_TIMEOUT) as client:
+                    resp = client.post(_ai_url('/ask'), json=body)
+            except httpx.TimeoutException:
+                return Response(
+                    {'error': 'AI service timed out.'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT,
+                )
+            except httpx.HTTPError as e:
+                return Response(
+                    {'error': f'AI service unavailable: {e.__class__.__name__}'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            if resp.status_code >= 500:
+                return Response(
+                    {'error': 'AI service unavailable.'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            out = Response(resp.text, status=resp.status_code, content_type=resp.headers.get('content-type', 'application/json'))
+            sid = resp.headers.get('X-Session-Id') or str(chat.id)
+            out['X-Session-Id'] = sid
+            return out
+
+        # Streaming path — open the upstream stream and yield chunks.
+        def upstream():
+            try:
+                client = httpx.Client(timeout=settings.AI_STREAM_TIMEOUT)
+                req = client.build_request('POST', _ai_url('/ask'), json=body)
+                resp = client.send(req, stream=True)
+                # If upstream gave a non-2xx, surface a one-shot error string.
+                if resp.status_code >= 500:
+                    resp.close()
+                    client.close()
+                    yield b'AI service unavailable.\n'
+                    return
+                for chunk in resp.iter_raw():
+                    if chunk:
+                        yield chunk
+                resp.close()
+                client.close()
+            except httpx.TimeoutException:
+                yield b'\n[ai timeout]\n'
+            except httpx.HTTPError as e:
+                yield f'\n[ai error: {e.__class__.__name__}]\n'.encode('utf-8')
+
+        out = StreamingHttpResponse(upstream(), content_type='text/event-stream')
+        out['X-Session-Id'] = str(chat.id)
+        out['Cache-Control'] = 'no-cache'
+        return out

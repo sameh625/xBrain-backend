@@ -954,6 +954,12 @@ Auth errors on protected endpoints return **401**:
 | 47 | POST | `/api/meeting-requests/{id}/accept/` | Yes (answerer) | Accept and pick a slot |
 | 48 | POST | `/api/meeting-requests/{id}/decline/` | Yes (answerer) | Decline a request |
 | 49 | POST | `/api/meeting-requests/{id}/cancel/` | Yes (asker) | Cancel a request |
+| AI-1 | GET | `/api/ai/chats/` | Yes | List my chats |
+| AI-2 | POST | `/api/ai/chats/` | Yes | Start a new chat |
+| AI-3 | GET | `/api/ai/chats/{id}/` | Yes (owner) | Chat row + history |
+| AI-4 | PATCH | `/api/ai/chats/{id}/` | Yes (owner) | Rename a chat |
+| AI-5 | DELETE | `/api/ai/chats/{id}/` | Yes (owner) | Delete a chat |
+| AI-6 | POST | `/api/ai/chats/{id}/ask/` | Yes (owner) | Ask a question — streams reply |
 
 ---
 
@@ -1622,5 +1628,161 @@ Both:
 **The list endpoints don't expose a `score` field.** It's an internal sorting key. UI ordering = response order; don't try to re-sort client-side.
 
 **Anonymous viewers still get newest-first.** If you preview the feed on the login screen, expect chronological order.
+
+**Filters compose with ranking.** `?author=`, `?specialization=`, `?q=`, `?is_resolved=` apply before the score, so a filtered feed is still ranked within the filtered set.
+
+---
+
+## AI Chat (Sprint 5)
+
+A standalone AI service ("Agentic RAG + Memory") handles the actual chat. Django acts as a thin proxy in front of it — it owns the per-user chat index (so we can list / rename / delete chats) and forwards every question to the AI, streaming the reply back to Flutter. Conversation history itself lives in the AI's vector store, not in Postgres.
+
+**Auth**: every endpoint here requires `Authorization: Bearer <access_token>`.
+
+### Lifecycle
+
+1. **Create a chat**: `POST /api/ai/chats/` → returns a `chat_id` (UUID). This is what you'll use for every follow-up call. Title is optional; if you don't provide one, it's auto-derived from the first question.
+2. **Ask questions** on a chat: `POST /api/ai/chats/{chat_id}/ask/` with `{"question": "..."}`. The reply streams back token-by-token (typing animation).
+3. **List my chats** for the sidebar: `GET /api/ai/chats/` (paginated, newest activity first).
+4. **Open a chat** later and see its history: `GET /api/ai/chats/{chat_id}/` returns the chat row plus the full conversation pulled live from the AI.
+5. **Rename** a chat: `PATCH /api/ai/chats/{chat_id}/` with `{"title": "..."}` (Django-only — the AI doesn't track titles).
+6. **Delete** a chat: `DELETE /api/ai/chats/{chat_id}/`. Removes the Django row and best-effort clears the AI's stored history for that chat.
+
+### Endpoints
+
+| # | Method | Endpoint | Auth | Description |
+|---|--------|----------|------|-------------|
+| AI-1 | GET | `/api/ai/chats/` | Yes | List my chats (paginated, newest activity first) |
+| AI-2 | POST | `/api/ai/chats/` | Yes | Start a new chat |
+| AI-3 | GET | `/api/ai/chats/{id}/` | Yes (owner) | Chat row + conversation history |
+| AI-4 | PATCH | `/api/ai/chats/{id}/` | Yes (owner) | Rename |
+| AI-5 | DELETE | `/api/ai/chats/{id}/` | Yes (owner) | Delete |
+| AI-6 | POST | `/api/ai/chats/{id}/ask/` | Yes (owner) | Send a question, stream reply |
+
+Trying to touch a chat that belongs to another user → `404 Not Found` (never 403 — we don't leak whether a given id exists for someone else).
+
+### Create chat — `POST /api/ai/chats/`
+
+Body (everything optional):
+```json
+{ "title": "Algorithms questions" }
+```
+
+Response **201**:
+```json
+{
+  "id": "11111111-2222-3333-4444-555555555555",
+  "title": "Algorithms questions",
+  "created_at": "2026-06-21T12:00:00Z",
+  "last_message_at": "2026-06-21T12:00:00Z"
+}
+```
+
+### List chats — `GET /api/ai/chats/`
+
+Paginated (`?page=`), 20 per page, ordered by `last_message_at` descending.
+
+```json
+{
+  "count": 3,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": "uuid",
+      "title": "Algorithms questions",
+      "created_at": "2026-06-21T12:00:00Z",
+      "last_message_at": "2026-06-21T12:30:00Z"
+    }
+  ]
+}
+```
+
+### Get chat detail — `GET /api/ai/chats/{id}/`
+
+Response **200**:
+```json
+{
+  "id": "uuid",
+  "title": "Algorithms questions",
+  "created_at": "2026-06-21T12:00:00Z",
+  "last_message_at": "2026-06-21T12:30:00Z",
+  "history": {
+    "messages": [
+      { "role": "user", "content": "what is recursion?" },
+      { "role": "assistant", "content": "Recursion is..." }
+    ],
+    "summary": "..."
+  }
+}
+```
+
+The exact shape of `history` is whatever the AI service returns from its `/session/{id}/history` endpoint — Django passes it through unchanged. If the AI is unreachable, `history` is `null` and the response also carries a `history_error` field with a short reason. The chat row itself is still returned so the sidebar doesn't break.
+
+### Rename — `PATCH /api/ai/chats/{id}/`
+
+```json
+{ "title": "New title" }
+```
+
+`title` is required, 1–120 chars, can't be whitespace-only. Returns the updated chat row.
+
+### Delete — `DELETE /api/ai/chats/{id}/`
+
+No body. Returns **204 No Content**. The Django row is gone regardless of whether the AI side cleanup succeeded.
+
+### Ask — `POST /api/ai/chats/{id}/ask/`
+
+Body:
+```json
+{ "question": "what is dynamic programming?", "stream": true }
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `question` | string | yes | 1–4000 chars, trimmed |
+| `stream` | bool | no | Default `true`. Set `false` to get a buffered single response. |
+
+**Streaming response (default)**:
+- HTTP **200**, `Content-Type: text/event-stream`.
+- Header `X-Session-Id: <chat_id>` so Flutter can correlate.
+- The body is raw text streamed from the AI service. Inside it there are **two literal markers** Flutter must split on:
+  1. `\n__ANSWER_DONE__` — the natural-language answer ends just before this line.
+  2. `\n__METADATA__` — a JSON line follows with sources, book titles, suggestions:
+     ```json
+     {
+       "answer": "Recursion is...",
+       "agent": "rag",
+       "sources": [...],
+       "book_titles": ["Intro to Algorithms"],
+       "deeper_suggestion": "Try reading chapter 7..."
+     }
+     ```
+
+**Non-streaming response (`stream: false`)**: a single JSON body returned as soon as the AI is done. Same content, no markers.
+
+**Errors**:
+- `400` — validation (empty question, > 4000 chars, etc.)
+- `404` — chat not found (or not yours)
+- `502` — AI service returned an error or was unreachable
+- `504` — AI service timed out
+
+### Flutter team notes — AI Chat
+
+**Title auto-generation.** If you create a chat without a title and then ask a question, the **first question's first 60 chars** become the title. Don't write a separate "set title from first message" round-trip — the server already does it.
+
+**`chat_id` is the session_id.** Internally, the UUID Django gives you back is exactly the `session_id` the AI service uses to retrieve memory + history. Pass the same `chat_id` to every `POST /api/ai/chats/{id}/ask/` call to keep the conversation context coherent.
+
+**Streaming format.** The AI's stream isn't classic Server-Sent Events with `data:` prefixes — it's just bytes. Buffer chunks as they arrive, append to the visible answer text **until** you encounter the literal substring `\n__ANSWER_DONE__`. Stop showing further bytes after that and treat everything after `\n__METADATA__` as a single JSON object (you can parse it once the stream closes).
+
+**Don't bypass Django.** The AI service runs on a private network — only Django can reach it. Hitting it directly from Flutter will fail (no public DNS).
+
+**One typing indicator per chat.** Until the first chunk arrives you can show a "thinking…" indicator. Once chunks start flowing, render them incrementally.
+
+**Timeouts.** Streaming responses can take up to 5 minutes (`AI_STREAM_TIMEOUT`). Non-streaming is capped at 60 seconds (`AI_REQUEST_TIMEOUT`). Treat `504` and `502` as transient — surface a "Try again" UI; the chat row is still there to retry against.
+
+**Chat history is the AI's job, not yours.** Don't try to cache or paginate `history` client-side — re-fetch via `GET /api/ai/chats/{id}/` when the user opens a chat. If `history` is `null` + there's a `history_error`, the AI is just temporarily down; show the chat anyway and let the user try asking.
+
+**Deleting a chat is final.** It clears both the Django row and (best-effort) the AI's memory. There's no undo.
 
 **Filters compose with ranking.** `?author=`, `?specialization=`, `?q=`, `?is_resolved=` apply before the score, so a filtered feed is still ranked within the filtered set.

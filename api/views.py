@@ -46,11 +46,13 @@ from .serializers import (
     MeetingRequestCreateSerializer,
     MeetingRequestAcceptSerializer,
     MeetingRequestDeclineSerializer,
+    SeenPostsInSerializer,
+    SeenQuestionsInSerializer,
 )
 from .models import (
     User, Specialization, UserSpecialization,
     Question, Answer, Post, PostReaction, Comment, Certificate,
-    MeetingRequest,
+    MeetingRequest, SeenPost, SeenQuestion, PointsWallet,
 )
 from .permissions import IsAuthorOrReadOnly, IsQuestionAuthor, IsCommentDeletable
 
@@ -530,7 +532,8 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         return QuestionListSerializer
 
     def get_queryset(self):
-        qs = _question_queryset_with_counts().order_by('-created_at')
+        viewer = self.request.user if self.request.user.is_authenticated else None
+        qs = _question_queryset_with_counts()
         params = self.request.query_params
 
         author = params.get('author')
@@ -552,6 +555,18 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         if q:
             qs = qs.filter(content__icontains=q)
 
+        if viewer is not None:
+            from .utils import annotate_ranking
+            # Engagement for questions = answers_count (proxy for both reactions
+            # and comments since questions have neither).
+            qs = annotate_ranking(
+                qs, viewer,
+                engagement_field='answers_count',
+                seen_model=SeenQuestion,
+                seen_target_field='question',
+            )
+        else:
+            qs = qs.order_by('-created_at')
         return qs
 
     def perform_create(self, serializer):
@@ -560,8 +575,14 @@ class QuestionListCreateView(generics.ListCreateAPIView):
     @extend_schema(
         tags=['Q&A'],
         operation_id='qa_01_questions_list',
-        summary="List questions",
-        description="Paginated newest-first list of questions. Filters: ?author=, ?specialization=, ?is_resolved=, ?q=.",
+        summary="List questions (ranked feed for authenticated viewers)",
+        description=(
+            "Paginated list of questions. For authenticated viewers the list "
+            "is ordered by a personalized score (specialization match + "
+            "recency − already-seen + answer engagement). Anonymous viewers "
+            "get pure newest-first. Filters: ?author=, ?specialization=, "
+            "?is_resolved=, ?q=."
+        ),
         responses={200: QuestionListSerializer(many=True)},
     )
     def get(self, request, *args, **kwargs):
@@ -608,11 +629,25 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
         # After update, return the detail shape (with annotations) instead of the create/update shape.
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
+        if instance.is_blocked:
+            raise DRFValidationError(
+                "This question is locked by an active meeting request and cannot be edited. "
+                "Cancel the meeting request first."
+            )
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         instance = self.get_queryset().get(pk=instance.pk)
         return Response(QuestionDetailSerializer(instance, context={'request': request}).data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.is_blocked:
+            raise DRFValidationError(
+                "This question is locked by an active meeting request and cannot be deleted. "
+                "Cancel the meeting request first."
+            )
+        return super().destroy(request, *args, **kwargs)
 
     @extend_schema(
         tags=['Q&A'],
@@ -625,7 +660,7 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
     @extend_schema(
         tags=['Q&A'],
         operation_id='qa_04_question_update',
-        summary="Update a question (author only)",
+        summary="Update a question (author only). Forbidden while the question is blocked by an active meeting request.",
         request=QuestionCreateUpdateSerializer,
     )
     def patch(self, request, *args, **kwargs):
@@ -634,22 +669,34 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
     @extend_schema(
         tags=['Q&A'],
         operation_id='qa_05_question_delete',
-        summary="Delete a question (author only). Cascades to answers and replies.",
+        summary="Delete a question (author only). Forbidden while the question is blocked by an active meeting request. Cascades to answers and replies.",
     )
     def delete(self, request, *args, **kwargs):
         return super().delete(request, *args, **kwargs)
 
 
 class QuestionResolveView(APIView):
-    """POST /api/questions/{id}/resolve/ — asker only. Idempotent."""
+    """POST /api/questions/{id}/resolve/ — asker only.
+
+    Triggers the point transfer from asker → answerer (the meet attendee).
+    Requires the question to be currently blocked by a SCHEDULED meeting whose
+    `scheduled_at` time has already arrived. Not idempotent in the points
+    sense: a second call on an already-transferred question is a no-op."""
     permission_classes = [IsAuthenticated, IsQuestionAuthor]
 
     @extend_schema(
         tags=['Q&A'],
         operation_id='qa_06_question_resolve',
-        summary="Mark a question as resolved (asker only). Idempotent.",
+        summary="Mark a question as resolved and transfer points (asker only).",
+        description=(
+            "Resolving a question transfers the booked points from the asker's "
+            "wallet to the answerer (the user who attended the scheduled meet). "
+            "Requires that the question is blocked by a SCHEDULED meeting and "
+            "that the meeting's `scheduled_at` time has already passed."
+        ),
         responses={
             200: QuestionDetailSerializer,
+            400: OpenApiResponse(description="Question is not blocked by a scheduled meet, or the meet time has not yet arrived."),
             403: OpenApiResponse(description="Only the question's author may resolve it."),
             404: OpenApiResponse(description="Question not found."),
         },
@@ -659,11 +706,60 @@ class QuestionResolveView(APIView):
         question = get_object_or_404(Question, pk=pk)
         self.check_object_permissions(request, question)
 
-        if not question.is_resolved:
-            with transaction.atomic():
-                question.is_resolved = True
-                question.resolved_at = timezone.now()
-                question.save(update_fields=['is_resolved', 'resolved_at', 'updated_at'])
+        if question.is_transferred:
+            # Already done — return current state idempotently.
+            question = _question_queryset_with_counts().get(pk=pk)
+            return Response(
+                QuestionDetailSerializer(question, context={'request': request}).data,
+                status=status.HTTP_200_OK,
+            )
+
+        if not question.is_blocked or question.answerer_id is None:
+            raise DRFValidationError(
+                "Cannot resolve — no scheduled meeting on this question. "
+                "Request a meeting and wait for the answerer to accept first."
+            )
+
+        scheduled_meet = (
+            MeetingRequest.objects
+            .filter(answer__question=question, status=MeetingRequest.STATUS_SCHEDULED)
+            .order_by('-created_at')
+            .first()
+        )
+        if scheduled_meet is None or scheduled_meet.scheduled_at is None:
+            raise DRFValidationError(
+                "Cannot resolve — no scheduled meeting found on this question."
+            )
+        if timezone.now() < scheduled_meet.scheduled_at:
+            raise DRFValidationError(
+                "Cannot resolve — the meeting time has not arrived yet."
+            )
+
+        with transaction.atomic():
+            # Lock the wallets to avoid double-spend if concurrent requests collide.
+            asker_wallet = PointsWallet.objects.select_for_update().get(user=request.user)
+            answerer_wallet = PointsWallet.objects.select_for_update().get(
+                user=scheduled_meet.answerer,
+            )
+            amount = question.booked_amount
+            if amount > 0:
+                if asker_wallet.balance < amount:
+                    # Defensive — booking should already guarantee this, but a
+                    # manual admin adjustment could break the invariant.
+                    raise DRFValidationError(
+                        "Cannot resolve — asker wallet balance is below the booked amount."
+                    )
+                asker_wallet.balance -= amount
+                asker_wallet.save(update_fields=['balance'])
+                answerer_wallet.balance += amount
+                answerer_wallet.save(update_fields=['balance'])
+
+            question.is_resolved = True
+            question.is_transferred = True
+            question.resolved_at = timezone.now()
+            question.save(update_fields=[
+                'is_resolved', 'is_transferred', 'resolved_at', 'updated_at',
+            ])
 
         question = _question_queryset_with_counts().get(pk=pk)
         return Response(
@@ -690,6 +786,11 @@ class QuestionUnresolveView(APIView):
     def post(self, request, pk):
         question = get_object_or_404(Question, pk=pk)
         self.check_object_permissions(request, question)
+
+        if question.is_transferred:
+            raise DRFValidationError(
+                "Cannot unresolve — points have already been transferred for this question."
+            )
 
         if question.is_resolved:
             with transaction.atomic():
@@ -954,7 +1055,7 @@ class PostListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         viewer = self.request.user if self.request.user.is_authenticated else None
-        qs = _post_queryset_with_counts(viewer=viewer).order_by('-created_at')
+        qs = _post_queryset_with_counts(viewer=viewer)
         params = self.request.query_params
 
         author = params.get('author')
@@ -969,13 +1070,39 @@ class PostListCreateView(generics.ListCreateAPIView):
         if q:
             qs = qs.filter(content__icontains=q)
 
+        # Personalized ranking for authenticated viewers; anonymous viewers
+        # still get pure recency (cheap and avoids needing user specializations).
+        if viewer is not None:
+            from django.db.models import F, FloatField, ExpressionWrapper
+            from .utils import annotate_ranking
+            # Engagement for posts = likes + dislikes + comments.
+            qs = qs.annotate(
+                engagement=ExpressionWrapper(
+                    F('likes_count') + F('dislikes_count') + F('comments_count'),
+                    output_field=FloatField(),
+                ),
+            )
+            qs = annotate_ranking(
+                qs, viewer,
+                engagement_field='engagement',
+                seen_model=SeenPost,
+                seen_target_field='post',
+            )
+        else:
+            qs = qs.order_by('-created_at')
         return qs
 
     @extend_schema(
         tags=['Posts'],
         operation_id='posts_01_list',
-        summary="List posts",
-        description="Paginated newest-first list of posts. Filters: ?author=, ?specialization=, ?q=. Each post carries likes/dislikes counts and (if authenticated) the viewer's `my_reaction`.",
+        summary="List posts (ranked feed for authenticated viewers)",
+        description=(
+            "Paginated list of posts. For authenticated viewers the list is "
+            "ordered by a personalized score (specialization match + recency − "
+            "already-seen + engagement). Anonymous viewers get pure newest-first. "
+            "Filters: ?author=, ?specialization=, ?q=. Each post carries "
+            "likes/dislikes counts and (if authenticated) the viewer's `my_reaction`."
+        ),
         responses={200: PostListSerializer(many=True)},
     )
     def get(self, request, *args, **kwargs):
@@ -1122,6 +1249,86 @@ class PostDislikeView(_PostReactionToggleView):
     )
     def post(self, request, pk):
         return self._toggle(request, pk)
+
+
+class MarkPostsSeenView(APIView):
+    """POST /api/posts/seen/ — bulk-mark posts as seen by the current user.
+
+    The Flutter client calls this with the IDs of posts that actually rendered
+    on screen; the ranked feed then demotes them on subsequent pages."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = SeenPostsInSerializer
+
+    @extend_schema(
+        tags=['Posts'],
+        operation_id='posts_08_mark_seen',
+        summary="Mark posts as seen by the current user (ranked feed signal).",
+        description=(
+            "Body: `{\"post_ids\": [\"uuid\", ...]}`. Unknown IDs are silently "
+            "ignored. Idempotent — calling twice with the same IDs just refreshes "
+            "their `seen_at`. The ranked feed uses this to demote already-seen "
+            "posts on future requests."
+        ),
+        request=SeenPostsInSerializer,
+        responses={
+            204: OpenApiResponse(description="Seen state recorded."),
+            400: OpenApiResponse(description="Malformed input or too many IDs."),
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request):
+        serializer = SeenPostsInSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        post_ids = serializer.validated_data['post_ids']
+
+        # Filter to existing posts so we don't create FKs to nothing.
+        known_ids = list(Post.objects.filter(id__in=post_ids).values_list('id', flat=True))
+        if known_ids:
+            SeenPost.objects.bulk_create(
+                [SeenPost(user=request.user, post_id=pid) for pid in known_ids],
+                update_conflicts=True,
+                unique_fields=['user', 'post'],
+                update_fields=['seen_at'],
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MarkQuestionsSeenView(APIView):
+    """POST /api/questions/seen/ — bulk-mark questions as seen by the current user."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = SeenQuestionsInSerializer
+
+    @extend_schema(
+        tags=['Q&A'],
+        operation_id='qa_16_mark_seen',
+        summary="Mark questions as seen by the current user (ranked feed signal).",
+        description=(
+            "Body: `{\"question_ids\": [\"uuid\", ...]}`. Unknown IDs are silently "
+            "ignored. Idempotent — calling twice with the same IDs just refreshes "
+            "their `seen_at`. The ranked feed uses this to demote already-seen "
+            "questions on future requests."
+        ),
+        request=SeenQuestionsInSerializer,
+        responses={
+            204: OpenApiResponse(description="Seen state recorded."),
+            400: OpenApiResponse(description="Malformed input or too many IDs."),
+            401: OpenApiResponse(description="Authentication required."),
+        },
+    )
+    def post(self, request):
+        serializer = SeenQuestionsInSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question_ids = serializer.validated_data['question_ids']
+
+        known_ids = list(Question.objects.filter(id__in=question_ids).values_list('id', flat=True))
+        if known_ids:
+            SeenQuestion.objects.bulk_create(
+                [SeenQuestion(user=request.user, question_id=qid) for qid in known_ids],
+                update_conflicts=True,
+                unique_fields=['user', 'question'],
+                update_fields=['seen_at'],
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # =====================================================================
@@ -1578,16 +1785,19 @@ class RequestMeetingView(APIView):
     @extend_schema(
         tags=['Meetings'],
         operation_id='meetings_04_request',
-        summary="Request a live meeting on an answer",
+        summary="Request a live meeting on an answer (books points from asker's wallet)",
         description=(
             "The question's author proposes 1–5 time slots to the answerer. "
-            "Only the question's author may call this. One active request per "
-            "(asker, answer) at a time."
+            "Only the question's author may call this. **Books the question's "
+            "cost from the asker's available wallet balance** and locks the "
+            "question (no further meets, no edits, no deletes) until the "
+            "request is declined, cancelled, or the question is resolved."
         ),
         request=MeetingRequestCreateSerializer,
         responses={
             201: MeetingRequestSerializer,
-            400: OpenApiResponse(description="Validation error or duplicate active request."),
+            400: OpenApiResponse(description="Validation error, duplicate active request, or question already blocked."),
+            402: OpenApiResponse(description="Insufficient available points balance to book this meeting."),
             403: OpenApiResponse(description="Only the question's author may request a meeting."),
             404: OpenApiResponse(description="Answer not found."),
         },
@@ -1623,18 +1833,50 @@ class RequestMeetingView(APIView):
         serializer = MeetingRequestCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        meeting_request = MeetingRequest.objects.create(
-            answer=answer,
-            asker=request.user,
-            answerer=answer.author,
-            duration_minutes=serializer.validated_data['duration_minutes'],
-            proposed_slots=serializer.validated_data['proposed_slots'],
-            message=serializer.validated_data.get('message', ''),
-            status=MeetingRequest.STATUS_PENDING,
-        )
+        from .utils import compute_question_cost, send_meeting_request_created_email
+
+        with transaction.atomic():
+            # Lock the question row so two concurrent requests on different
+            # answers of the same question can't both book the same wallet slot.
+            question = Question.objects.select_for_update().get(pk=answer.question_id)
+            if question.is_blocked:
+                raise DRFValidationError(
+                    "This question is already locked by another active meeting request."
+                )
+
+            cost = compute_question_cost(question.specializations.all())
+            if request.user.available_balance < cost:
+                return Response(
+                    {
+                        'error': (
+                            f'Insufficient points. Need {cost} points to book this meeting; '
+                            f'you have {request.user.available_balance} available '
+                            f'(wallet balance minus points already booked on other meetings).'
+                        ),
+                        'required': cost,
+                        'available': request.user.available_balance,
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED,
+                )
+
+            meeting_request = MeetingRequest.objects.create(
+                answer=answer,
+                asker=request.user,
+                answerer=answer.author,
+                duration_minutes=serializer.validated_data['duration_minutes'],
+                proposed_slots=serializer.validated_data['proposed_slots'],
+                message=serializer.validated_data.get('message', ''),
+                status=MeetingRequest.STATUS_PENDING,
+            )
+
+            question.is_blocked = True
+            question.booked_amount = cost
+            question.answerer = answer.author
+            question.save(update_fields=[
+                'is_blocked', 'booked_amount', 'answerer', 'updated_at',
+            ])
 
         # Notify the answerer (failure is logged but doesn't block creation).
-        from .utils import send_meeting_request_created_email
         send_meeting_request_created_email(meeting_request)
 
         return Response(
@@ -1772,9 +2014,23 @@ class DeclineMeetingView(APIView):
         serializer = MeetingRequestDeclineSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        meeting_request.status = MeetingRequest.STATUS_DECLINED
-        meeting_request.decline_message = serializer.validated_data.get('message', '')
-        meeting_request.save(update_fields=['status', 'decline_message', 'updated_at'])
+        with transaction.atomic():
+            meeting_request.status = MeetingRequest.STATUS_DECLINED
+            meeting_request.decline_message = serializer.validated_data.get('message', '')
+            meeting_request.save(update_fields=['status', 'decline_message', 'updated_at'])
+
+            # Release the booking on the question so the asker can try again
+            # with a different answer's author.
+            question = Question.objects.select_for_update().get(
+                pk=meeting_request.answer.question_id
+            )
+            if question.is_blocked and not question.is_transferred:
+                question.is_blocked = False
+                question.booked_amount = 0
+                question.answerer = None
+                question.save(update_fields=[
+                    'is_blocked', 'booked_amount', 'answerer', 'updated_at',
+                ])
 
         from .utils import send_meeting_declined_email
         send_meeting_declined_email(meeting_request)
@@ -1825,8 +2081,21 @@ class CancelMeetingView(APIView):
             from .google_meet import cancel_meet_event
             cancel_meet_event(meeting_request.google_event_id)
 
-        meeting_request.status = MeetingRequest.STATUS_CANCELLED
-        meeting_request.save(update_fields=['status', 'updated_at'])
+        with transaction.atomic():
+            meeting_request.status = MeetingRequest.STATUS_CANCELLED
+            meeting_request.save(update_fields=['status', 'updated_at'])
+
+            # Release the booking — refunds the asker's available balance.
+            question = Question.objects.select_for_update().get(
+                pk=meeting_request.answer.question_id
+            )
+            if question.is_blocked and not question.is_transferred:
+                question.is_blocked = False
+                question.booked_amount = 0
+                question.answerer = None
+                question.save(update_fields=[
+                    'is_blocked', 'booked_amount', 'answerer', 'updated_at',
+                ])
 
         from .utils import send_meeting_cancelled_email
         send_meeting_cancelled_email(meeting_request)

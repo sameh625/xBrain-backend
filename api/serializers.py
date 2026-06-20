@@ -186,7 +186,7 @@ class UserLoginSerializer(serializers.Serializer):
 class SpecializationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Specialization
-        fields = ['id', 'name', 'description']
+        fields = ['id', 'name', 'description', 'points']
         read_only_fields = ['id']
 
 
@@ -573,33 +573,43 @@ class PublicAuthorSerializer(serializers.ModelSerializer):
 
 
 class SpecializationCompactSerializer(serializers.ModelSerializer):
-    """Compact specialization (id and name) for embedding in Question payloads."""
+    """Compact specialization (id, name, points) for embedding in Question payloads.
+
+    `points` is included so Flutter can show the per-spec value without an
+    extra request when the user is picking which specializations to tag."""
 
     class Meta:
         model = Specialization
-        fields = ['id', 'name']
+        fields = ['id', 'name', 'points']
 
 
 class QuestionListSerializer(serializers.ModelSerializer):
     """List representation used by GET /api/questions/.
 
-    Returns a content preview, the question's specializations, and a single
-    `answers_count` that totals top-level answers and replies together."""
+    Returns a content preview, the question's specializations, the booking
+    state, the computed cost, and a single `answers_count` that totals
+    top-level answers and replies together."""
     author = PublicAuthorSerializer(read_only=True)
     content_preview = serializers.SerializerMethodField()
     specializations = SpecializationCompactSerializer(many=True, read_only=True)
     answers_count = serializers.IntegerField(read_only=True)
     attachments = AttachmentSerializer(many=True, read_only=True)
+    cost = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
         fields = [
             'id', 'author', 'content_preview', 'specializations',
-            'is_resolved', 'answers_count', 'attachments', 'created_at',
+            'is_resolved', 'is_blocked', 'is_transferred', 'booked_amount', 'cost',
+            'answers_count', 'attachments', 'created_at',
         ]
 
     def get_content_preview(self, obj) -> str:
         return obj.content[:120]
+
+    def get_cost(self, obj) -> int:
+        from .utils import compute_question_cost
+        return compute_question_cost(obj.specializations.all())
 
 
 class AnswerSerializer(serializers.ModelSerializer):
@@ -650,18 +660,23 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
     """Detail representation used by GET /api/questions/{id}/.
 
     Embeds the first ten top-level answers with their first two replies each,
-    and exposes a single `answers_count` totaling top-level answers and replies."""
+    and exposes a single `answers_count` totaling top-level answers and replies.
+    The `answerer` (meet attendee who will receive points on resolve) is
+    visible only to the question's author; everyone else sees null."""
     author = PublicAuthorSerializer(read_only=True)
     specializations = SpecializationCompactSerializer(many=True, read_only=True)
     answers_count = serializers.IntegerField(read_only=True)
     answers = serializers.SerializerMethodField()
     attachments = AttachmentSerializer(many=True, read_only=True)
+    cost = serializers.SerializerMethodField()
+    answerer = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
         fields = [
             'id', 'author', 'content', 'specializations',
             'is_resolved', 'resolved_at',
+            'is_blocked', 'is_transferred', 'booked_amount', 'cost', 'answerer',
             'answers_count', 'answers', 'attachments',
             'created_at', 'updated_at',
         ]
@@ -676,6 +691,22 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
                .order_by('created_at')[:10]
         )
         return TopLevelAnswerWithRepliesSerializer(top_level, many=True, context=self.context).data
+
+    def get_cost(self, obj) -> int:
+        from .utils import compute_question_cost
+        return compute_question_cost(obj.specializations.all())
+
+    @extend_schema_field(PublicAuthorSerializer(allow_null=True))
+    def get_answerer(self, obj):
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request else None
+        if viewer is None or not viewer.is_authenticated:
+            return None
+        if viewer.id != obj.author_id:
+            return None
+        if obj.answerer is None:
+            return None
+        return PublicAuthorSerializer(obj.answerer, context=self.context).data
 
 
 @extend_schema_field({'type': 'string', 'format': 'binary'})
@@ -1188,3 +1219,32 @@ class MeetingRequestSerializer(serializers.ModelSerializer):
 
     def get_question_preview(self, obj) -> str:
         return obj.answer.question.content[:120]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Seen tracking (ranked feed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cap the input list size — Flutter only ever sends back the IDs visible in
+# its current page, so this is comfortably above the natural payload.
+MAX_SEEN_IDS_PER_REQUEST = 200
+
+
+class SeenPostsInSerializer(serializers.Serializer):
+    """Input shape for POST /api/posts/seen/."""
+    post_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+        max_length=MAX_SEEN_IDS_PER_REQUEST,
+        help_text=f"UUIDs of posts the client has rendered (max {MAX_SEEN_IDS_PER_REQUEST}).",
+    )
+
+
+class SeenQuestionsInSerializer(serializers.Serializer):
+    """Input shape for POST /api/questions/seen/."""
+    question_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+        max_length=MAX_SEEN_IDS_PER_REQUEST,
+        help_text=f"UUIDs of questions the client has rendered (max {MAX_SEEN_IDS_PER_REQUEST}).",
+    )

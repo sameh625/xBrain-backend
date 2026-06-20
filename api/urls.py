@@ -35,6 +35,8 @@ from .views import (
     PostDetailView,
     PostLikeView,
     PostDislikeView,
+    MarkPostsSeenView,
+    MarkQuestionsSeenView,
     MyCertificatesListCreateView,
     MyCertificateDeleteView,
     UserCertificatesPublicView,
@@ -75,6 +77,7 @@ urlpatterns = [
     path('specializations/', SpecializationListView.as_view(), name='specializations'),
 
     path('questions/', QuestionListCreateView.as_view(), name='questions'),
+    path('questions/seen/', MarkQuestionsSeenView.as_view(), name='questions-mark-seen'),
     path('questions/<uuid:pk>/', QuestionDetailView.as_view(), name='question-detail'),
     path('questions/<uuid:pk>/resolve/', QuestionResolveView.as_view(), name='question-resolve'),
     path('questions/<uuid:pk>/unresolve/', QuestionUnresolveView.as_view(), name='question-unresolve'),
@@ -85,6 +88,7 @@ urlpatterns = [
     path('attachments/<uuid:pk>/', AttachmentDeleteView.as_view(), name='attachment-delete'),
 
     path('posts/', PostListCreateView.as_view(), name='posts'),
+    path('posts/seen/', MarkPostsSeenView.as_view(), name='posts-mark-seen'),
     path('posts/<uuid:pk>/', PostDetailView.as_view(), name='post-detail'),
     path('posts/<uuid:pk>/like/', PostLikeView.as_view(), name='post-like'),
     path('posts/<uuid:pk>/dislike/', PostDislikeView.as_view(), name='post-dislike'),

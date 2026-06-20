@@ -6,13 +6,16 @@ Decisions baked in:
 - D3 = question detail embeds first 10 top-level answers, each with first 2 replies inline.
 """
 
+from datetime import timedelta
+
 from django.test import TestCase
 from django.urls import reverse
 from django.core.cache import cache
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import User, Specialization, Question, Answer
+from .models import User, Specialization, Question, Answer, MeetingRequest
 
 
 def _make_user(email, username, phone):
@@ -28,6 +31,45 @@ def _make_user(email, username, phone):
 
 def _spec(name):
     return Specialization.objects.create(name=name, description='')
+
+
+_PREPARE_COUNTER = {'n': 0}
+
+
+def _prepare_for_resolve(asker, question_id):
+    """Synthesize the state required by the Sprint 4 resolve flow:
+    a SCHEDULED meeting in the past on this question, with the question
+    blocked, an answerer set, and the cost booked. Without this, POST
+    /resolve/ returns 400 because the contract now requires a meet to
+    have already happened."""
+    from .utils import compute_question_cost
+
+    _PREPARE_COUNTER['n'] += 1
+    n = _PREPARE_COUNTER['n']
+    answerer = _make_user(
+        f'prep-ans-{n}@e.com',
+        f'prepans{n:03d}',
+        f'+19{n:09d}',
+    )
+    q = Question.objects.get(pk=question_id)
+    answer = Answer.objects.create(question=q, author=answerer, content='ans')
+    past = timezone.now() - timedelta(hours=1)
+    MeetingRequest.objects.create(
+        answer=answer, asker=asker, answerer=answerer,
+        duration_minutes=30,
+        proposed_slots=[past],
+        scheduled_at=past,
+        status=MeetingRequest.STATUS_SCHEDULED,
+    )
+    cost = compute_question_cost(q.specializations.all())
+    if asker.wallet.balance < cost:
+        asker.wallet.balance = cost
+        asker.wallet.save(update_fields=['balance'])
+    q.is_blocked = True
+    q.booked_amount = cost
+    q.answerer = answerer
+    q.save(update_fields=['is_blocked', 'booked_amount', 'answerer'])
+    return answerer
 
 
 class QuestionTests(TestCase):
@@ -150,8 +192,9 @@ class QuestionTests(TestCase):
     def test_filter_by_is_resolved_true(self):
         r1 = self._create_question(content='unresolved')
         r2 = self._create_question(content='resolved')
-        # Resolve r2
+        # Resolve r2 (requires the Sprint 4 prep: scheduled past meet on it).
         q2_id = r2.data['id']
+        _prepare_for_resolve(self.asker, q2_id)
         self.client.force_authenticate(user=self.asker)
         self.client.post(reverse('api:question-resolve', args=[q2_id]))
 
@@ -270,12 +313,14 @@ class ResolveUnresolveTests(TestCase):
         cache.clear()
 
     def test_resolve_as_asker(self):
+        _prepare_for_resolve(self.asker, self.q_id)
         res = self.client.post(reverse('api:question-resolve', args=[self.q_id]))
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
         self.assertTrue(res.data['is_resolved'])
         self.assertIsNotNone(res.data['resolved_at'])
 
     def test_resolve_already_resolved_is_noop(self):
+        _prepare_for_resolve(self.asker, self.q_id)
         self.client.post(reverse('api:question-resolve', args=[self.q_id]))
         res = self.client.post(reverse('api:question-resolve', args=[self.q_id]))
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -791,6 +836,7 @@ class FilterCombinationTests(TestCase):
             {'content': 'alice resolved', 'specializations': [str(self.spec.id)]},
             format='json',
         )
+        _prepare_for_resolve(self.alice, r1.data['id'])
         self.client.post(reverse('api:question-resolve', args=[r1.data['id']]))
 
         self.client.post(
@@ -1083,10 +1129,19 @@ class ResolvedAtTimestampTests(TestCase):
         self.assertIsNone(res.data['resolved_at'])
 
     def test_resolved_at_set_after_resolve(self):
+        _prepare_for_resolve(self.asker, self.q_id)
         res = self.client.post(reverse('api:question-resolve', args=[self.q_id]))
         self.assertIsNotNone(res.data['resolved_at'])
 
     def test_resolved_at_cleared_after_unresolve(self):
-        self.client.post(reverse('api:question-resolve', args=[self.q_id]))
+        # After Sprint 4, resolve auto-transfers points and unresolve is
+        # forbidden on transferred questions. Simulate the "resolved-not-
+        # transferred" state by setting the flag via the ORM, then call
+        # unresolve and verify it clears the timestamp.
+        q = Question.objects.get(pk=self.q_id)
+        q.is_resolved = True
+        q.resolved_at = timezone.now()
+        q.save(update_fields=['is_resolved', 'resolved_at'])
         res = self.client.post(reverse('api:question-unresolve', args=[self.q_id]))
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
         self.assertIsNone(res.data['resolved_at'])

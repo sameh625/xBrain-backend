@@ -45,6 +45,107 @@ ATTACHMENT_LIMITS = {
 MAX_ATTACHMENTS_PER_PARENT = 4
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Points / cost computation for Questions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Flat bonus added per ADDITIONAL specialization beyond the first.
+# Total question cost = max(spec.points across the question's specs)
+#                      + QUESTION_EXTRA_SPEC_BONUS * (number_of_specs - 1).
+QUESTION_EXTRA_SPEC_BONUS = 5
+
+
+def compute_question_cost(specializations):
+    """Compute the booking cost of a question from its specializations.
+
+    Accepts any iterable of Specialization instances (or a queryset). Returns 0
+    if no specializations are passed — the serializer-level validator already
+    rejects empty lists at create-time, so 0 only happens for transient pre-save
+    inspection.
+    """
+    specs = list(specializations)
+    if not specs:
+        return 0
+    max_points = max(s.points for s in specs)
+    return int(max_points) + QUESTION_EXTRA_SPEC_BONUS * (len(specs) - 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ranking weights for Posts & Questions feeds
+# ─────────────────────────────────────────────────────────────────────────────
+
+# All weights are admin-tunable. Final score is:
+#   score = W_SPEC      * spec_overlap_count
+#         + W_RECENCY   * (1 / (hours_since_created + RECENCY_OFFSET_HOURS))
+#         - W_SEEN      * 1{seen by viewer}
+#         + W_ENGAGE    * engagement_count
+W_SPEC = 50.0
+W_RECENCY = 30.0
+W_SEEN = 40.0
+W_ENGAGE = 1.0
+RECENCY_OFFSET_HOURS = 2.0
+
+
+def annotate_ranking(qs, viewer, *, engagement_field, seen_model, seen_target_field):
+    """Attach a `score` annotation to a queryset for ranked feeds.
+
+    Args:
+      qs: a queryset already annotated with the engagement count (e.g.
+          likes_count + dislikes_count + comments_count for posts, or
+          answers_count for questions).
+      viewer: an authenticated User. Caller is responsible for handling
+          anonymous viewers separately.
+      engagement_field: the name of the integer field on the queryset that
+          represents engagement (already-annotated).
+      seen_model: SeenPost or SeenQuestion.
+      seen_target_field: 'post' or 'question' — the FK name on seen_model
+          pointing at the queryset's model.
+
+    Result is ordered by -score with -created_at as the tiebreaker.
+    """
+    from django.db.models import (
+        Count, ExpressionWrapper, F, FloatField, Q, Value, Exists,
+        OuterRef, Case, When, Func,
+    )
+    from django.db.models.functions import Now
+
+    class _EpochSeconds(Func):
+        """EXTRACT(EPOCH FROM <interval>) → float seconds. Postgres-specific."""
+        function = 'EXTRACT'
+        template = "EXTRACT(EPOCH FROM %(expressions)s)"
+        output_field = FloatField()
+
+    viewer_spec_ids = list(viewer.specializations.values_list('id', flat=True))
+
+    spec_overlap = Count(
+        'specializations',
+        filter=Q(specializations__id__in=viewer_spec_ids),
+        distinct=True,
+    ) if viewer_spec_ids else Value(0)
+
+    seen_exists = Exists(
+        seen_model.objects.filter(user=viewer, **{seen_target_field: OuterRef('pk')})
+    )
+
+    # Recency: 1 / (hours_since + offset). Computed entirely in the DB so we
+    # don't pull every row into Python.
+    seconds_since = _EpochSeconds(Now() - F('created_at'))
+    recency_factor = ExpressionWrapper(
+        Value(1.0) / (seconds_since / Value(3600.0) + Value(RECENCY_OFFSET_HOURS)),
+        output_field=FloatField(),
+    )
+
+    qs = qs.annotate(spec_overlap=spec_overlap, is_seen=seen_exists)
+    score = ExpressionWrapper(
+        F('spec_overlap') * Value(W_SPEC)
+        + recency_factor * Value(W_RECENCY)
+        + Case(When(is_seen=True, then=Value(-W_SEEN)), default=Value(0.0), output_field=FloatField())
+        + F(engagement_field) * Value(W_ENGAGE),
+        output_field=FloatField(),
+    )
+    return qs.annotate(score=score).order_by('-score', '-created_at')
+
+
 def classify_and_validate_attachment(uploaded_file):
     """Classify an uploaded file by MIME type and validate its size.
 

@@ -358,10 +358,10 @@ Returns the current user's full profile.
   "bio": "...",
   "profile_image_url": "https://.../profile.jpg",
   "specializations": [
-    { "id": "uuid", "name": "Backend", "description": "Server-side development..." }
+    { "id": "uuid", "name": "Backend", "description": "Server-side development...", "points": 50 }
   ],
   "specialization_form_completed_at": "2026-04-10T10:00:00Z",
-  "wallet": { "id": "uuid", "balance": "0.00" },
+  "wallet": { "id": "uuid", "balance": 100 },
   "posts_count": 5,
   "questions_count": 12,
   "created_at": "2026-01-01T00:00:00Z",
@@ -369,7 +369,7 @@ Returns the current user's full profile.
 }
 ```
 
-`posts_count` and `questions_count` are aggregated server-side — no need to call the list endpoints just to render badges on the profile screen. `wallet` is a nested object; read the balance via `wallet.balance`.
+`posts_count` and `questions_count` are aggregated server-side — no need to call the list endpoints just to render badges on the profile screen. `wallet` is a nested object; `wallet.balance` is an **integer** points count (no currency). `wallet.balance` is the gross balance — to know what's actually spendable, subtract the sum of `booked_amount` across the user's currently-blocked questions (visible on each question's list/detail response).
 
 ---
 
@@ -406,7 +406,8 @@ Updates the authenticated user's profile. Uses `Content-Type: multipart/form-dat
     {
       "id": "uuid",
       "name": "Back-end Development",
-      "description": "Server-side development..."
+      "description": "Server-side development...",
+      "points": 50
     }
   ]
 }
@@ -470,10 +471,36 @@ These power the Questions, Answers, and Replies feature. All require `Authorizat
 
 ---
 
-### 13. List Questions
+### Reward Points on Questions (Sprint 4)
+
+Each `Specialization` carries a fixed **points** value (admin-tunable). A question's **cost** is the price the asker pays the answerer for a live explanation:
+
+```
+cost = max(specialization.points across the question's specs)
+     + 5 × (number_of_specs − 1)        # +5 per extra spec
+```
+
+**Lifecycle:**
+
+1. **Create a question** — free. No charge, no booking. The detail/list response exposes the computed `cost` so the asker knows what a meeting will cost. Asker can freely edit or delete the question.
+2. **Request a meeting** on one of its answers (`POST /api/answers/{id}/request-meeting/`) — **books the cost** from the asker's wallet. The question becomes `is_blocked=true`, no further meets can be created, no more edits, no delete. If the asker's available balance (`wallet.balance` − points already booked on their other open meetings) is below the cost, the request is rejected with **402 Payment Required**.
+3. **Answerer accepts** — the Google Calendar event is created (existing flow). No points movement.
+4. **Answerer declines / asker cancels** — booking is released, question becomes unblocked. The asker can try again with a different answer (different answerer).
+5. **Asker resolves** (`POST /api/questions/{id}/resolve/`) **after the meet's scheduled time has passed** — the booked points transfer from `asker.wallet` → `answerer.wallet`. Question becomes `is_transferred=true`. Cannot be unresolved.
+
+**Flutter team notes:**
+- Show `question.cost` next to the meet-request button so the asker knows the price upfront.
+- Show the user's `wallet.balance` minus the visible total of `booked_amount` across their own open questions, so they know what's actually spendable.
+- A 402 response from the meet-request endpoint is **not a bug** — show "not enough points" UX.
+- While `is_blocked=true`, hide the question's edit and delete buttons and disable the "request meeting" button on all of its answers.
+- The `answerer` field on the question detail is only populated for the question's own author. Other viewers always see `null`.
+
+---
+
+### 13. List Questions (ranked feed)
 `GET /api/questions/`
 
-Paginated newest-first list of questions.
+Paginated list of questions. **For authenticated viewers the order is personalized**: a per-row score combines specialization match against the viewer's profile (high weight), recency (medium), the already-seen penalty (medium, via `POST /api/questions/seen/` — see below), and answer engagement (low). Anonymous viewers still get pure newest-first.
 
 **Query params (all optional):**
 
@@ -501,10 +528,14 @@ Paginated newest-first list of questions.
       },
       "content_preview": "How do I deploy a Django app to Azure with Postgres? I'm running into...",
       "specializations": [
-        { "id": "uuid", "name": "Backend" },
-        { "id": "uuid", "name": "DevOps" }
+        { "id": "uuid", "name": "Backend", "points": 50 },
+        { "id": "uuid", "name": "DevOps", "points": 40 }
       ],
       "is_resolved": false,
+      "is_blocked": false,
+      "is_transferred": false,
+      "booked_amount": 0,
+      "cost": 55,
       "answers_count": 12,
       "created_at": "2026-04-28T12:00:00Z"
     }
@@ -515,6 +546,28 @@ Paginated newest-first list of questions.
 `content_preview` is the first 120 chars of the question content. Get the full content from the detail endpoint.
 
 `answers_count` is the **total** of top-level answers and replies combined (Facebook-style "12 comments").
+
+`cost` is the points the asker will be charged if they request a meeting on one of this question's answers (formula in the Reward Points section above). `booked_amount` is what's currently held aside; non-zero only when `is_blocked=true`.
+
+---
+
+### 13b. Mark Questions Seen (ranked-feed signal)
+`POST /api/questions/seen/`
+
+Tell the backend which question IDs the Flutter client has actually rendered on screen so the ranked feed can demote them on subsequent pages.
+
+**Body:**
+```json
+{ "question_ids": ["uuid", "uuid", "..."] }
+```
+
+- Up to 200 IDs per request.
+- Unknown IDs are silently ignored.
+- Idempotent — calling twice with the same IDs just refreshes their `seen_at`.
+
+**Response (204):** No content.
+
+**Errors:** `400` malformed input, `401` auth required.
 
 ---
 
@@ -568,10 +621,15 @@ Returns the question plus its **first 10 top-level answers**, each with the **fi
   },
   "content": "Full question text here...",
   "specializations": [
-    { "id": "uuid", "name": "Backend" }
+    { "id": "uuid", "name": "Backend", "points": 50 }
   ],
   "is_resolved": false,
   "resolved_at": null,
+  "is_blocked": false,
+  "is_transferred": false,
+  "booked_amount": 0,
+  "cost": 50,
+  "answerer": null,
   "answers_count": 12,
   "answers": [
     {
@@ -604,6 +662,8 @@ Returns the question plus its **first 10 top-level answers**, each with the **fi
 
 **Important**: each top-level answer has both `replies_count` (total) and `replies` (first 2 only). If `replies_count > replies.length`, fetch the rest from `GET /api/answers/{id}/replies/`.
 
+`answerer` is the user who accepted (or is scheduled to attend) the live meeting and will receive `booked_amount` points when the asker resolves the question. **This field is only populated for the question's own author** — other viewers always see `null` so the answerer's identity isn't leaked.
+
 **Errors (404):** Question does not exist.
 
 ---
@@ -611,7 +671,7 @@ Returns the question plus its **first 10 top-level answers**, each with the **fi
 ### 16. Update a Question
 `PATCH /api/questions/{id}/`
 
-Author only. Returns the same detail shape as the GET above.
+Author only. Returns the same detail shape as the GET above. **Forbidden while the question is blocked by an active meeting request** — the asker must cancel that request first.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -620,7 +680,7 @@ Author only. Returns the same detail shape as the GET above.
 | `is_resolved` | `boolean` | no | (Prefer the dedicated `/resolve/` endpoint below for clarity) |
 
 **Errors:**
-- `400` — same validation rules as create.
+- `400` — same validation rules as create, OR `"This question is locked by an active meeting request and cannot be edited. Cancel the meeting request first."`
 - `403` — request user is not the question's author.
 - `404` — question does not exist.
 
@@ -629,24 +689,32 @@ Author only. Returns the same detail shape as the GET above.
 ### 17. Delete a Question
 `DELETE /api/questions/{id}/`
 
-Author only. **Cascades** — deleting a question also deletes all its answers and replies.
+Author only. **Cascades** — deleting a question also deletes all its answers and replies. **Forbidden while the question is blocked by an active meeting request** — the asker must cancel that request first.
 
 **Response (204):** No content.
 
 **Errors:**
+- `400` — `"This question is locked by an active meeting request and cannot be deleted. Cancel the meeting request first."`
 - `403` — not the author.
 - `404` — does not exist.
 
 ---
 
-### 18. Mark Question Resolved
+### 18. Mark Question Resolved (triggers point transfer)
 `POST /api/questions/{id}/resolve/`
 
-Asker only. Idempotent — calling on an already-resolved question is a no-op `200`. No request body.
+Asker only. **Transfers `booked_amount` points from the asker's wallet to the `answerer`** (the user who attended the scheduled meet). Requires the question to currently be blocked by a SCHEDULED meeting AND the meeting's `scheduled_at` time to have already passed. Calling on an already-transferred question is a no-op `200`.
 
-**Response (200):** Full question detail shape with `is_resolved: true` and `resolved_at` set.
+No request body.
+
+**Response (200):** Full question detail shape with `is_resolved: true`, `is_transferred: true`, `resolved_at` set. Both wallets have been updated.
 
 **Errors:**
+- `400` — one of:
+  - `"Cannot resolve — no scheduled meeting on this question. Request a meeting and wait for the answerer to accept first."`
+  - `"Cannot resolve — no scheduled meeting found on this question."`
+  - `"Cannot resolve — the meeting time has not arrived yet."`
+  - `"Cannot resolve — asker wallet balance is below the booked amount."` (defensive; should not happen in normal flows)
 - `403` — not the asker.
 - `404` — does not exist.
 
@@ -655,11 +723,12 @@ Asker only. Idempotent — calling on an already-resolved question is a no-op `2
 ### 19. Mark Question Unresolved
 `POST /api/questions/{id}/unresolve/`
 
-Asker only. Idempotent. No request body. For when the asker realizes the question still needs more discussion.
+Asker only. Idempotent. No request body. **Forbidden once points have been transferred** — there's no automated reverse-transfer.
 
 **Response (200):** Full question detail shape with `is_resolved: false` and `resolved_at: null`.
 
 **Errors:**
+- `400` — `"Cannot unresolve — points have already been transferred for this question."`
 - `403` — not the asker.
 - `404` — does not exist.
 
@@ -845,13 +914,14 @@ Auth errors on protected endpoints return **401**:
 | 13 | GET | `/api/users/me/specializations/` | Yes | My specializations |
 | 13 | PUT | `/api/users/me/specializations/` | Yes | Set my specializations |
 | 13 | PATCH | `/api/users/me/specializations/` | Yes | Skip specialization form |
-| 14 | GET | `/api/questions/` | Read-only OK | List questions (paginated) |
+| 14 | GET | `/api/questions/` | Read-only OK | List questions — **ranked feed** for auth viewers |
+| 14b | POST | `/api/questions/seen/` | Yes | Mark question IDs as seen by me (ranked-feed signal) |
 | 15 | POST | `/api/questions/` | Yes | Create a question |
 | 16 | GET | `/api/questions/{id}/` | Read-only OK | Question detail + 10 answers + 2 replies each |
-| 17 | PATCH | `/api/questions/{id}/` | Yes (author) | Update a question |
-| 18 | DELETE | `/api/questions/{id}/` | Yes (author) | Delete a question (cascades) |
-| 19 | POST | `/api/questions/{id}/resolve/` | Yes (asker) | Mark question resolved |
-| 20 | POST | `/api/questions/{id}/unresolve/` | Yes (asker) | Mark question unresolved |
+| 17 | PATCH | `/api/questions/{id}/` | Yes (author) | Update a question (forbidden while blocked) |
+| 18 | DELETE | `/api/questions/{id}/` | Yes (author) | Delete a question (forbidden while blocked; cascades) |
+| 19 | POST | `/api/questions/{id}/resolve/` | Yes (asker) | Mark resolved + transfer points |
+| 20 | POST | `/api/questions/{id}/unresolve/` | Yes (asker) | Mark unresolved (forbidden once transferred) |
 | 21 | GET | `/api/questions/{id}/answers/` | Read-only OK | List top-level answers |
 | 22 | POST | `/api/questions/{id}/answers/` | Yes | Post an answer |
 | 23 | GET | `/api/answers/{id}/` | Read-only OK | Get single answer / reply |
@@ -859,7 +929,8 @@ Auth errors on protected endpoints return **401**:
 | 23 | DELETE | `/api/answers/{id}/` | Yes (author) | Delete an answer / reply (cascades) |
 | 24 | GET | `/api/answers/{id}/replies/` | Read-only OK | List replies under an answer |
 | 25 | POST | `/api/answers/{id}/replies/` | Yes | Post a reply (depth-1 only) |
-| 26 | GET | `/api/posts/` | Read-only OK | List posts (paginated) |
+| 26 | GET | `/api/posts/` | Read-only OK | List posts — **ranked feed** for auth viewers |
+| 26b | POST | `/api/posts/seen/` | Yes | Mark post IDs as seen by me (ranked-feed signal) |
 | 27 | POST | `/api/posts/` | Yes | Create a post |
 | 28 | GET/PATCH/DELETE | `/api/posts/{id}/` | Mixed | Post detail / update / delete |
 | 29 | POST | `/api/posts/{id}/like/` | Yes | Toggle like |
@@ -1037,10 +1108,10 @@ Replies aren't restricted to the question's author. Any authenticated user can r
 
 Knowledge-sharing posts. Same shape as Q&A's Question (no resolve flag) plus likes/dislikes.
 
-### List Posts
+### List Posts (ranked feed)
 `GET /api/posts/`
 
-Paginated newest-first. Filters: `?author=`, `?specialization=`, `?q=`. Anonymous reads OK.
+Paginated list. **For authenticated viewers the order is personalized**: per-row score combines specialization match against the viewer's profile (high weight), recency (medium), the already-seen penalty (medium, via `POST /api/posts/seen/` — see below), and engagement = `likes + dislikes + comments` (low). Anonymous viewers still get pure newest-first. Filters: `?author=`, `?specialization=`, `?q=`. Anonymous reads OK.
 
 **Response card shape**:
 ```json
@@ -1048,7 +1119,7 @@ Paginated newest-first. Filters: `?author=`, `?specialization=`, `?q=`. Anonymou
   "id": "uuid",
   "author": { "id": "...", "username": "...", "profile_image_url": "..." },
   "content_preview": "first 120 chars of post content",
-  "specializations": [{ "id": "...", "name": "Backend" }],
+  "specializations": [{ "id": "...", "name": "Backend", "points": 50 }],
   "attachments": [],
   "likes_count": 42,
   "dislikes_count": 3,
@@ -1057,6 +1128,24 @@ Paginated newest-first. Filters: `?author=`, `?specialization=`, `?q=`. Anonymou
   "created_at": "..."
 }
 ```
+
+### Mark Posts Seen (ranked-feed signal)
+`POST /api/posts/seen/`
+
+Tell the backend which post IDs the Flutter client has rendered on screen so the ranked feed can demote them on subsequent pages.
+
+**Body:**
+```json
+{ "post_ids": ["uuid", "uuid", "..."] }
+```
+
+- Up to 200 IDs per request.
+- Unknown IDs are silently ignored.
+- Idempotent — calling twice just refreshes `seen_at`.
+
+**Response (204):** No content.
+
+**Errors:** `400` malformed input, `401` auth required.
 
 ### Create a Post
 `POST /api/posts/`
@@ -1300,6 +1389,8 @@ All endpoints require auth. Object-level permissions enforce that only the asker
 
 Auth required. Only the **question's author** (the asker) may call this. The `{id}` is the **answer ID**, not the question ID.
 
+**Books points (Sprint 4):** creating the request reserves the question's `cost` from the asker's wallet and locks the question (`is_blocked=true`). The asker cannot edit, delete, or open another meeting on the same question until this request is declined, cancelled, or the question is resolved. If the asker doesn't have enough available balance, the request is rejected with **402 Payment Required**.
+
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `duration_minutes` | `integer` | yes | One of `15`, `30`, `45`, `60` |
@@ -1342,6 +1433,17 @@ Auth required. Only the **question's author** (the asker) may call this. The `{i
 
 Both "self-request" and "already active request" return a 400 with a bare list as the response body (not a dict keyed by field name), because the view raises `ValidationError("string")` directly.
 
+**Question already blocked (400):** `["This question is already locked by another active meeting request."]` — happens if the same asker tries to open a second meeting on a different answer to the same question.
+
+**Insufficient points (402):** body looks like
+```json
+{
+  "error": "Insufficient points. Need 55 points to book this meeting; you have 20 available (wallet balance minus points already booked on other meetings).",
+  "required": 55,
+  "available": 20
+}
+```
+
 **Possible errors (403):** Caller is not the question's author — `"Only the question's author may request a meeting on its answers."`.
 
 ### Accept a meeting
@@ -1379,7 +1481,7 @@ Auth required. Only the **answerer** can decline. Optional `message` (≤ 500 ch
 }
 ```
 
-**Response (200):** Full meeting with `status: "declined"` and the supplied text echoed back as `decline_message`.
+**Response (200):** Full meeting with `status: "declined"` and the supplied text echoed back as `decline_message`. **Releases the booking** on the question — `is_blocked` becomes `false`, `booked_amount` returns to `0`, and the asker can immediately request a different meeting.
 
 ### Cancel a meeting
 
@@ -1389,7 +1491,7 @@ Auth required. Only the **asker** can cancel. Works in both `pending` and `sched
 
 No request body.
 
-**Response (200):** Full meeting with `status: "cancelled"`.
+**Response (200):** Full meeting with `status: "cancelled"`. **Releases the booking** — the question becomes unblocked and the asker's available balance recovers immediately.
 
 ### List my meetings
 
@@ -1474,3 +1576,51 @@ final clean = "${iso.split('.').first}Z";  // "2026-06-01T15:00:00Z"
 **Polling vs. push.** There are no push notifications wired up in this sprint. The asker should refresh the "outgoing" list (or the specific meeting detail) when returning to the app to see whether the answerer accepted or declined. Email notifications go out on every state transition, so users are not blind to the state change even without polling.
 
 **Validation mirroring.** Mirror the server-side rules on the client to fail fast — reject slots < 1 hour ahead, > 30 days ahead, or > 5 entries before submitting. Source of truth is still the server: render its `400` field-level messages directly.
+
+---
+
+## Ranked Feed + Seen Tracking (Sprint 4)
+
+`GET /api/posts/` and `GET /api/questions/` now return a **personalized score-sorted list** for authenticated viewers. Anonymous viewers still get pure newest-first.
+
+### Score formula
+
+For each candidate item:
+
+```
+score = 50  × overlap_count(viewer.specs ∩ item.specs)        # high weight
+      + 30  × (1 / (hours_since_created + 2))                 # medium weight, smooth decay
+      − 40  × 1{viewer has already seen this item}            # medium-weight penalty
+      + 1   × engagement                                       # low weight
+```
+
+Engagement is `likes_count + dislikes_count + comments_count` for posts, and `answers_count` (top-level + replies) for questions. Ties break by newest-first.
+
+### Mark-seen endpoints
+
+To get the "seen" penalty to kick in, the Flutter client must tell the backend which IDs it has actually rendered on screen.
+
+```
+POST /api/posts/seen/        body: {"post_ids":     ["uuid", ...]}
+POST /api/questions/seen/    body: {"question_ids": ["uuid", ...]}
+```
+
+Both:
+- Accept up to **200** IDs per request.
+- Silently ignore unknown IDs.
+- Are idempotent — re-posting refreshes `seen_at`.
+- Return **204 No Content** on success.
+
+### Flutter team notes — Ranked feed
+
+**When to mark seen.** Send the visible-IDs batch when the user **scrolls past** an item in the list (e.g. when the widget leaves the viewport), or in a single batch when the user navigates away from the feed page. Don't mark items seen the moment they're returned by the API — only the ones the user actually viewed.
+
+**Debounce / batch.** Buffer IDs client-side and POST them every ~5–10 s or on backgrounding. The endpoint is built to absorb batches, not a per-item ping.
+
+**Pagination still works as usual.** `?page=` paginates the score-sorted list. The score is recomputed on each request, so a brand-new like or a freshly-posted item in the user's specialization can naturally bubble up between pages — this is expected.
+
+**The list endpoints don't expose a `score` field.** It's an internal sorting key. UI ordering = response order; don't try to re-sort client-side.
+
+**Anonymous viewers still get newest-first.** If you preview the feed on the login screen, expect chronological order.
+
+**Filters compose with ranking.** `?author=`, `?specialization=`, `?q=`, `?is_resolved=` apply before the score, so a filtered feed is still ranked within the filtered set.

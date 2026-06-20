@@ -244,7 +244,8 @@ class VerifyEmailTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(email=self.email)
         self.assertTrue(PointsWallet.objects.filter(user=user).exists())
-        self.assertEqual(user.wallet.balance, 0)
+        # Sprint 4: new accounts get a 50-point signup bonus.
+        self.assertEqual(user.wallet.balance, 50)
 
     def test_verify_email_wrong_otp(self):
         """Verification fails with wrong OTP"""
@@ -462,7 +463,8 @@ class LoginTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('wallet', response.data['user'])
-        self.assertEqual(response.data['user']['wallet']['balance'], 0)
+        # Sprint 4: new accounts get a 50-point signup bonus.
+        self.assertEqual(response.data['user']['wallet']['balance'], 50)
 
     def test_login_returns_specializations(self):
         """Login response includes specializations (empty initially)"""

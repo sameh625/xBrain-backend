@@ -197,9 +197,24 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     def get_full_name(self):
         return f"{self.first_name} {self.last_name}".strip() or self.username
-    
+
     def get_short_name(self):
         return self.first_name or self.username
+
+    @property
+    def available_balance(self):
+        """Wallet balance minus the sum of booked points on the user's currently
+        blocked, not-yet-transferred questions. Used by the meeting-request
+        flow to decide whether the asker can afford a new meet."""
+        from django.db.models import Sum
+        from django.db.models.functions import Coalesce
+        booked = (
+            self.questions
+                .filter(is_blocked=True, is_transferred=False)
+                .aggregate(total=Coalesce(Sum('booked_amount'), 0))['total']
+        )
+        wallet_balance = getattr(getattr(self, 'wallet', None), 'balance', 0)
+        return wallet_balance - booked
 
 
 class Specialization(models.Model):
@@ -224,7 +239,16 @@ class Specialization(models.Model):
         max_length=500,
         help_text="Detailed description of the specialization"
     )
-    
+
+    points = models.PositiveIntegerField(
+        _('points'),
+        default=10,
+        help_text=(
+            "Base point value used for question cost. The cost of a question "
+            "is max(points) across its specializations + a flat bonus per extra spec."
+        ),
+    )
+
     class Meta:
         db_table = 'specializations'
         verbose_name = _('specialization')
@@ -401,6 +425,24 @@ class Question(models.Model):
     )
     is_resolved = models.BooleanField(default=False)
     resolved_at = models.DateTimeField(null=True, blank=True)
+
+    # Points/booking fields. A question is "blocked" while an active meeting
+    # request exists on it: points are reserved from the asker's wallet, no
+    # further meets can be created, and the asker cannot edit or delete the
+    # question. On resolve (after the meet's scheduled time) the reserved
+    # points are transferred from asker → answerer.
+    is_blocked = models.BooleanField(default=False, db_index=True)
+    booked_amount = models.PositiveIntegerField(default=0)
+    answerer = models.ForeignKey(
+        'User',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='questions_to_explain',
+        help_text="The user (meet attendee) who will receive points on resolve.",
+    )
+    is_transferred = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -416,6 +458,16 @@ class Question(models.Model):
         indexes = [
             models.Index(fields=['-created_at'], name='idx_q_created'),
             models.Index(fields=['author', '-created_at'], name='idx_q_author_created'),
+        ]
+        constraints = [
+            # A transferred question must have been blocked and have an answerer.
+            models.CheckConstraint(
+                check=(
+                    models.Q(is_transferred=False)
+                    | (models.Q(is_blocked=True) & models.Q(answerer__isnull=False))
+                ),
+                name='q_transferred_requires_block_and_answerer',
+            ),
         ]
 
     def __str__(self):
@@ -731,3 +783,55 @@ class MeetingRequest(models.Model):
 
     def __str__(self):
         return f"MeetingRequest({self.status}) by {self.asker.username} → {self.answerer.username}"
+
+
+class SeenPost(models.Model):
+    """Tracks that a user has seen a post in their feed.
+
+    Used by the ranked feed to demote already-seen items. The Flutter client
+    posts back batches of post IDs it has rendered; one row per (user, post).
+    `seen_at` updates on re-seen so we could later decay the penalty by age."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='seen_posts',
+    )
+    post = models.ForeignKey(
+        'Post',
+        on_delete=models.CASCADE,
+        related_name='seen_by',
+    )
+    seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seen_posts'
+        unique_together = ('user', 'post')
+        indexes = [
+            models.Index(fields=['user', 'post'], name='idx_seenp_user_post'),
+        ]
+
+
+class SeenQuestion(models.Model):
+    """Tracks that a user has seen a question in their feed. Mirrors SeenPost."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='seen_questions',
+    )
+    question = models.ForeignKey(
+        'Question',
+        on_delete=models.CASCADE,
+        related_name='seen_by',
+    )
+    seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seen_questions'
+        unique_together = ('user', 'question')
+        indexes = [
+            models.Index(fields=['user', 'question'], name='idx_seenq_user_question'),
+        ]

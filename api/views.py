@@ -574,6 +574,20 @@ class QuestionListCreateView(generics.ListCreateAPIView):
             qs = qs.order_by('-created_at')
         return qs
 
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        if request.user.is_authenticated and isinstance(response.data, dict):
+            results = response.data.get('results') or []
+            question_ids = [item['id'] for item in results if item.get('id')]
+            if question_ids:
+                SeenQuestion.objects.bulk_create(
+                    [SeenQuestion(user=request.user, question_id=qid) for qid in question_ids],
+                    update_conflicts=True,
+                    unique_fields=['user', 'question'],
+                    update_fields=['seen_at'],
+                )
+        return response
+
     def perform_create(self, serializer):
         serializer.save(author=self.request.user)
 
@@ -1096,6 +1110,20 @@ class PostListCreateView(generics.ListCreateAPIView):
         else:
             qs = qs.order_by('-created_at')
         return qs
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        if request.user.is_authenticated and isinstance(response.data, dict):
+            results = response.data.get('results') or []
+            post_ids = [item['id'] for item in results if item.get('id')]
+            if post_ids:
+                SeenPost.objects.bulk_create(
+                    [SeenPost(user=request.user, post_id=pid) for pid in post_ids],
+                    update_conflicts=True,
+                    unique_fields=['user', 'post'],
+                    update_fields=['seen_at'],
+                )
+        return response
 
     @extend_schema(
         tags=['Posts'],

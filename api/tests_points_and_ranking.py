@@ -502,3 +502,100 @@ class MarkSeenEndpointTests(TestCase):
         )
         self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT, res.data)
         self.assertTrue(SeenQuestion.objects.filter(user=self.viewer, question=q).exists())
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Auto-seen on feed pagination
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class AutoSeenOnFeedTests(TestCase):
+    """The feed endpoints (GET /api/posts/, GET /api/questions/) auto-mark
+    every item on the served page as seen for the authenticated viewer.
+    Profile lists (/users/me/posts/) and anonymous requests do NOT."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.s = _spec('S', points=20)
+        self.viewer = _make_user(
+            'v@e.com', 'vieweruser', '+1000070001', specs=[self.s],
+        )
+        self.other = _make_user('o@e.com', 'otheruser', '+1000070002')
+
+    def _make_post(self, content):
+        p = Post.objects.create(author=self.other, content=content)
+        p.specializations.set([self.s])
+        return p
+
+    def _make_question(self, content):
+        q = Question.objects.create(author=self.other, content=content)
+        q.specializations.set([self.s])
+        return q
+
+    def test_get_posts_feed_auto_marks_returned_items_seen(self):
+        posts = [self._make_post(f'post {i}') for i in range(3)]
+        self.client.force_authenticate(user=self.viewer)
+        res = self.client.get(reverse('api:posts'))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        returned_ids = {r['id'] for r in res.data['results']}
+        seen_ids = set(
+            SeenPost.objects.filter(user=self.viewer).values_list('post_id', flat=True)
+        )
+        self.assertEqual({str(pid) for pid in seen_ids}, returned_ids)
+        self.assertEqual(len(seen_ids), len(posts))
+
+    def test_get_questions_feed_auto_marks_returned_items_seen(self):
+        questions = [self._make_question(f'q {i}') for i in range(3)]
+        self.client.force_authenticate(user=self.viewer)
+        res = self.client.get(reverse('api:questions'))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        returned_ids = {r['id'] for r in res.data['results']}
+        seen_ids = set(
+            SeenQuestion.objects.filter(user=self.viewer).values_list('question_id', flat=True)
+        )
+        self.assertEqual({str(qid) for qid in seen_ids}, returned_ids)
+        self.assertEqual(len(seen_ids), len(questions))
+
+    def test_anonymous_feed_request_does_not_create_seen_rows(self):
+        self._make_post('anon visible')
+        self.client.force_authenticate(user=None)
+        res = self.client.get(reverse('api:posts'))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(SeenPost.objects.count(), 0)
+
+    def test_profile_posts_view_does_not_mark_seen(self):
+        # Viewer's own post; profile list should never auto-mark seen.
+        own = Post.objects.create(author=self.viewer, content='mine')
+        own.specializations.set([self.s])
+        self.client.force_authenticate(user=self.viewer)
+        res = self.client.get(reverse('api:my-posts'))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(SeenPost.objects.filter(user=self.viewer).count(), 0)
+
+    def test_feed_auto_seen_is_idempotent(self):
+        post = self._make_post('once')
+        self.client.force_authenticate(user=self.viewer)
+        self.client.get(reverse('api:posts'))
+        self.client.get(reverse('api:posts'))
+        # No IntegrityError from the unique_together, and only one row exists.
+        self.assertEqual(
+            SeenPost.objects.filter(user=self.viewer, post=post).count(), 1,
+        )
+
+    def test_feed_returns_at_most_10_items_per_page(self):
+        # PAGE_SIZE is 10. 15 posts → page 1 has 10, page 2 has 5.
+        for i in range(15):
+            self._make_post(f'p{i}')
+        self.client.force_authenticate(user=self.viewer)
+
+        res1 = self.client.get(reverse('api:posts'))
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res1.data['results']), 10)
+        self.assertEqual(res1.data['count'], 15)
+
+        res2 = self.client.get(reverse('api:posts'), {'page': 2})
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res2.data['results']), 5)

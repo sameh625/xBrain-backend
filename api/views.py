@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticate
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.exceptions import ValidationError as DRFValidationError, PermissionDenied
 from rest_framework_simplejwt.tokens import RefreshToken
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from django.contrib.auth import authenticate
 from django.core.cache import cache
 from django.db import transaction
@@ -697,25 +697,35 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
 class QuestionResolveView(APIView):
     """POST /api/questions/{id}/resolve/ — asker only.
 
-    Triggers the point transfer from asker → answerer (the meet attendee).
-    Requires the question to be currently blocked by a SCHEDULED meeting whose
-    `scheduled_at` time has already arrived. Not idempotent in the points
-    sense: a second call on an already-transferred question is a no-op."""
+    Picks one of two paths based on state:
+      * No active meeting — closes the question with no points movement.
+      * Active scheduled meeting whose time has passed — transfers the booked
+        points from asker → answerer.
+
+    A pending meeting (not yet accepted) or a scheduled meeting whose time
+    hasn't arrived yet is rejected with 400. Idempotent: calling twice on an
+    already-resolved (or already-transferred) question is a no-op `200`."""
     permission_classes = [IsAuthenticated, IsQuestionAuthor]
 
     @extend_schema(
         tags=['Q&A'],
         operation_id='qa_06_question_resolve',
-        summary="Mark a question as resolved and transfer points (asker only).",
+        summary="Mark a question resolved (asker only). Transfers points when a past scheduled meeting exists, otherwise closes with no points.",
         description=(
-            "Resolving a question transfers the booked points from the asker's "
-            "wallet to the answerer (the user who attended the scheduled meet). "
-            "Requires that the question is blocked by a SCHEDULED meeting and "
-            "that the meeting's `scheduled_at` time has already passed."
+            "Closes the question. Two paths, picked from state:\n\n"
+            "* **No meeting flow** — when the question is not blocked by an "
+            "active meeting (`is_blocked=false`), it's marked `is_resolved=true` "
+            "with no wallet movement.\n"
+            "* **Meeting flow** — when the question is blocked by a scheduled "
+            "meeting whose `scheduled_at` has already passed, the booked "
+            "points transfer from asker's wallet to the answerer's wallet and "
+            "`is_transferred=true`.\n\n"
+            "An open pending meeting, or a scheduled meeting whose time hasn't "
+            "arrived, returns 400 — cancel or wait first."
         ),
         responses={
             200: QuestionDetailSerializer,
-            400: OpenApiResponse(description="Question is not blocked by a scheduled meet, or the meet time has not yet arrived."),
+            400: OpenApiResponse(description="An active meeting is in flight (cancel it first), or its scheduled time has not yet arrived."),
             403: OpenApiResponse(description="Only the question's author may resolve it."),
             404: OpenApiResponse(description="Question not found."),
         },
@@ -725,20 +735,38 @@ class QuestionResolveView(APIView):
         question = get_object_or_404(Question, pk=pk)
         self.check_object_permissions(request, question)
 
+        # Already fully resolved through points transfer — idempotent no-op.
         if question.is_transferred:
-            # Already done — return current state idempotently.
             question = _question_queryset_with_counts().get(pk=pk)
             return Response(
                 QuestionDetailSerializer(question, context={'request': request}).data,
                 status=status.HTTP_200_OK,
             )
 
-        if not question.is_blocked or question.answerer_id is None:
-            raise DRFValidationError(
-                "Cannot resolve — no scheduled meeting on this question. "
-                "Request a meeting and wait for the answerer to accept first."
+        # Already closed via the no-meeting path — idempotent no-op.
+        if question.is_resolved:
+            question = _question_queryset_with_counts().get(pk=pk)
+            return Response(
+                QuestionDetailSerializer(question, context={'request': request}).data,
+                status=status.HTTP_200_OK,
             )
 
+        # No meeting in flight: close without moving points.
+        if not question.is_blocked:
+            with transaction.atomic():
+                question.is_resolved = True
+                question.resolved_at = timezone.now()
+                question.save(update_fields=['is_resolved', 'resolved_at', 'updated_at'])
+
+            question = _question_queryset_with_counts().get(pk=pk)
+            return Response(
+                QuestionDetailSerializer(question, context={'request': request}).data,
+                status=status.HTTP_200_OK,
+            )
+
+        # Question is blocked — must have a SCHEDULED meeting whose time has
+        # passed. A pending meeting (or an unscheduled block) needs to be
+        # cancelled first via /api/meeting-requests/{id}/cancel/.
         scheduled_meet = (
             MeetingRequest.objects
             .filter(answer__question=question, status=MeetingRequest.STATUS_SCHEDULED)
@@ -747,7 +775,8 @@ class QuestionResolveView(APIView):
         )
         if scheduled_meet is None or scheduled_meet.scheduled_at is None:
             raise DRFValidationError(
-                "Cannot resolve — no scheduled meeting found on this question."
+                "Cannot resolve — cancel the pending meeting request first, "
+                "then call resolve again."
             )
         if timezone.now() < scheduled_meet.scheduled_at:
             raise DRFValidationError(
@@ -1824,9 +1853,27 @@ class RequestMeetingView(APIView):
             "Only the question's author may call this. **Books the question's "
             "cost from the asker's available wallet balance** and locks the "
             "question (no further meets, no edits, no deletes) until the "
-            "request is declined, cancelled, or the question is resolved."
+            "request is declined, cancelled, or the question is resolved.\n\n"
+            "**Time format:** `proposed_slots` is a list of 1–5 ISO 8601 UTC "
+            "datetimes (`YYYY-MM-DDTHH:MM:SSZ`, trailing `Z` required). Each "
+            "slot must be at least 1 hour from now and at most 30 days ahead."
         ),
         request=MeetingRequestCreateSerializer,
+        examples=[
+            OpenApiExample(
+                name='Two-slot request',
+                summary='Asker proposes two 30-min slots in UTC',
+                value={
+                    'duration_minutes': 30,
+                    'proposed_slots': [
+                        '2026-07-05T14:00:00Z',
+                        '2026-07-06T10:00:00Z',
+                    ],
+                    'message': 'Would love a quick walkthrough.',
+                },
+                request_only=True,
+            ),
+        ],
         responses={
             201: MeetingRequestSerializer,
             400: OpenApiResponse(description="Validation error, duplicate active request, or question already blocked."),
@@ -1935,9 +1982,20 @@ class AcceptMeetingView(APIView):
             "Only the answerer can call this. The chosen slot must be one of "
             "the originally proposed datetimes. On success, the backend creates "
             "a Google Calendar event with an auto-generated Meet link and emails "
-            "both parties."
+            "both parties.\n\n"
+            "**Time format:** `scheduled_at` is an ISO 8601 UTC datetime "
+            "(`YYYY-MM-DDTHH:MM:SSZ`, trailing `Z` required) and must exactly "
+            "match one of the asker's `proposed_slots`."
         ),
         request=MeetingRequestAcceptSerializer,
+        examples=[
+            OpenApiExample(
+                name='Pick second slot',
+                summary='Answerer picks one of the proposed UTC slots',
+                value={'scheduled_at': '2026-07-06T10:00:00Z'},
+                request_only=True,
+            ),
+        ],
         responses={
             200: MeetingRequestSerializer,
             400: OpenApiResponse(description="Slot not in proposed list, or request not in pending state."),

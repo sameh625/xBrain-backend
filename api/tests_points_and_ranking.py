@@ -356,6 +356,113 @@ class ResolveTransferTests(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  Resolve without a meeting: same /resolve/ endpoint, no points transfer
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class ResolveWithoutMeetingTests(TestCase):
+    """The /resolve/ endpoint falls back to a no-points close when there's no
+    active meeting in flight. ResolveTransferTests covers the points-transfer
+    path; this class covers the no-meeting path on the same endpoint."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.s = _spec('S', points=30)
+        self.asker = _make_user('a@e.com', 'askeruser', '+1000050001', balance=100)
+        self.answerer = _make_user('b@e.com', 'ansuser1', '+1000050002', balance=10)
+        self.q = Question.objects.create(author=self.asker, content='?')
+        self.q.specializations.set([self.s])
+        self.a = Answer.objects.create(question=self.q, author=self.answerer, content='!')
+        self.url = reverse('api:question-resolve', kwargs={'pk': self.q.id})
+
+    def _assert_wallets_unchanged(self):
+        self.asker.wallet.refresh_from_db()
+        self.answerer.wallet.refresh_from_db()
+        self.assertEqual(self.asker.wallet.balance, 100)
+        self.assertEqual(self.answerer.wallet.balance, 10)
+
+    def test_resolve_with_no_meeting_marks_solved_without_transfer(self):
+        self.client.force_authenticate(user=self.asker)
+        res = self.client.post(self.url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.q.refresh_from_db()
+        self.assertTrue(self.q.is_resolved)
+        self.assertIsNotNone(self.q.resolved_at)
+        self.assertFalse(self.q.is_transferred)
+        self._assert_wallets_unchanged()
+
+    def test_resolve_with_no_meeting_is_idempotent(self):
+        self.client.force_authenticate(user=self.asker)
+        res1 = self.client.post(self.url)
+        res2 = self.client.post(self.url)
+        self.assertEqual(res1.status_code, status.HTTP_200_OK, res1.data)
+        self.assertEqual(res2.status_code, status.HTTP_200_OK, res2.data)
+        self.q.refresh_from_db()
+        self.assertTrue(self.q.is_resolved)
+        self.assertFalse(self.q.is_transferred)
+        self._assert_wallets_unchanged()
+
+    def test_resolve_with_pending_meeting_returns_400(self):
+        MeetingRequest.objects.create(
+            answer=self.a, asker=self.asker, answerer=self.answerer,
+            duration_minutes=30,
+            proposed_slots=[timezone.now() + timedelta(hours=24)],
+            status=MeetingRequest.STATUS_PENDING,
+        )
+        self.q.is_blocked = True
+        self.q.booked_amount = 30
+        self.q.answerer = self.answerer
+        self.q.save()
+
+        self.client.force_authenticate(user=self.asker)
+        res = self.client.post(self.url)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, res.data)
+        self.q.refresh_from_db()
+        self.assertFalse(self.q.is_resolved)
+        self._assert_wallets_unchanged()
+
+    def test_resolve_after_cancel_marks_solved_without_transfer(self):
+        mr = MeetingRequest.objects.create(
+            answer=self.a, asker=self.asker, answerer=self.answerer,
+            duration_minutes=30,
+            proposed_slots=[timezone.now() + timedelta(hours=24)],
+            status=MeetingRequest.STATUS_PENDING,
+        )
+        self.q.is_blocked = True
+        self.q.booked_amount = 30
+        self.q.answerer = self.answerer
+        self.q.save()
+
+        self.client.force_authenticate(user=self.asker)
+        cancel_res = self.client.post(reverse('api:cancel-meeting', kwargs={'pk': mr.id}))
+        self.assertEqual(cancel_res.status_code, status.HTTP_200_OK, cancel_res.data)
+
+        res = self.client.post(self.url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.q.refresh_from_db()
+        self.assertTrue(self.q.is_resolved)
+        self.assertFalse(self.q.is_transferred)
+        self._assert_wallets_unchanged()
+
+    def test_resolve_by_non_author_returns_403(self):
+        self.client.force_authenticate(user=self.answerer)
+        res = self.client.post(self.url)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN, res.data)
+        self.q.refresh_from_db()
+        self.assertFalse(self.q.is_resolved)
+
+    def test_unresolve_works_after_no_meeting_resolve(self):
+        self.client.force_authenticate(user=self.asker)
+        self.client.post(self.url)
+        res = self.client.post(reverse('api:question-unresolve', kwargs={'pk': self.q.id}))
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.q.refresh_from_db()
+        self.assertFalse(self.q.is_resolved)
+        self.assertIsNone(self.q.resolved_at)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  Ranked feed
 # ════════════════════════════════════════════════════════════════════════════
 

@@ -486,7 +486,10 @@ cost = max(specialization.points across the question's specs)
 2. **Request a meeting** on one of its answers (`POST /api/answers/{id}/request-meeting/`) — **books the cost** from the asker's wallet. The question becomes `is_blocked=true`, no further meets can be created, no more edits, no delete. If the asker's available balance (`wallet.balance` − points already booked on their other open meetings) is below the cost, the request is rejected with **402 Payment Required**.
 3. **Answerer accepts** — the Google Calendar event is created (existing flow). No points movement.
 4. **Answerer declines / asker cancels** — booking is released, question becomes unblocked. The asker can try again with a different answer (different answerer).
-5. **Asker resolves** (`POST /api/questions/{id}/resolve/`) **after the meet's scheduled time has passed** — the booked points transfer from `asker.wallet` → `answerer.wallet`. Question becomes `is_transferred=true`. Cannot be unresolved.
+5. **Asker resolves** (`POST /api/questions/{id}/resolve/`) — single endpoint, two paths chosen automatically from state:
+   - **With a past scheduled meeting**: the booked points transfer from `asker.wallet` → `answerer.wallet`. Question becomes `is_transferred=true`. Cannot be unresolved.
+   - **With no meeting in flight** (`is_blocked=false`): just marks `is_resolved=true`, **no points move**. Reversible via `/unresolve/`. Use when the thread answered the question well enough that the asker doesn't need a live call.
+   - **With a pending meeting, or a scheduled meeting whose time hasn't arrived**: rejected with 400. Cancel the meeting first (releases booked points), then call resolve.
 
 **Flutter team notes:**
 - Show `question.cost` next to the meet-request button so the asker knows the price upfront.
@@ -700,20 +703,22 @@ Author only. **Cascades** — deleting a question also deletes all its answers a
 
 ---
 
-### 18. Mark Question Resolved (triggers point transfer)
+### 18. Mark Question Resolved
 `POST /api/questions/{id}/resolve/`
 
-Asker only. **Transfers `booked_amount` points from the asker's wallet to the `answerer`** (the user who attended the scheduled meet). Requires the question to currently be blocked by a SCHEDULED meeting AND the meeting's `scheduled_at` time to have already passed. Calling on an already-transferred question is a no-op `200`.
+Asker only. Idempotent. No request body. Closes the question, picking one of two paths from the question's state:
 
-No request body.
+- **Meeting path** — when the question is blocked by a SCHEDULED meeting whose `scheduled_at` has already passed: transfers `booked_amount` points from the asker's wallet to the answerer's wallet, sets `is_resolved=true` and `is_transferred=true`. **Cannot be unresolved** afterwards.
+- **No-meeting path** — when the question is not blocked (`is_blocked=false`, e.g. no meeting was ever requested, or every meeting was declined / cancelled): just sets `is_resolved=true`, **no points move**. `is_transferred` stays `false`. **Reversible** via `/unresolve/`.
 
-**Response (200):** Full question detail shape with `is_resolved: true`, `is_transferred: true`, `resolved_at` set. Both wallets have been updated.
+A second call on an already-resolved question (either path) is a no-op `200` with the current detail.
+
+**Response (200):** Full question detail shape with `is_resolved: true`, `resolved_at` set. `is_transferred` is `true` only when the meeting path was taken.
 
 **Errors:**
 - `400` — one of:
-  - `"Cannot resolve — no scheduled meeting on this question. Request a meeting and wait for the answerer to accept first."`
-  - `"Cannot resolve — no scheduled meeting found on this question."`
-  - `"Cannot resolve — the meeting time has not arrived yet."`
+  - `"Cannot resolve — cancel the pending meeting request first, then call resolve again."` (an active meeting is in flight; cancel it via `POST /api/meeting-requests/{id}/cancel/` first)
+  - `"Cannot resolve — the meeting time has not arrived yet."` (scheduled meeting exists but its `scheduled_at` is still in the future)
   - `"Cannot resolve — asker wallet balance is below the booked amount."` (defensive; should not happen in normal flows)
 - `403` — not the asker.
 - `404` — does not exist.
@@ -723,7 +728,7 @@ No request body.
 ### 19. Mark Question Unresolved
 `POST /api/questions/{id}/unresolve/`
 
-Asker only. Idempotent. No request body. **Forbidden once points have been transferred** — there's no automated reverse-transfer.
+Asker only. Idempotent. No request body. **Forbidden once points have been transferred** — there's no automated reverse-transfer. Works on questions that were closed via the no-meeting path of `/resolve/` and flips them back to `is_resolved=false`.
 
 **Response (200):** Full question detail shape with `is_resolved: false` and `resolved_at: null`.
 
@@ -920,7 +925,7 @@ Auth errors on protected endpoints return **401**:
 | 16 | GET | `/api/questions/{id}/` | Read-only OK | Question detail + 10 answers + 2 replies each |
 | 17 | PATCH | `/api/questions/{id}/` | Yes (author) | Update a question (forbidden while blocked) |
 | 18 | DELETE | `/api/questions/{id}/` | Yes (author) | Delete a question (forbidden while blocked; cascades) |
-| 19 | POST | `/api/questions/{id}/resolve/` | Yes (asker) | Mark resolved + transfer points |
+| 19 | POST | `/api/questions/{id}/resolve/` | Yes (asker) | Resolve — transfers points if a past scheduled meeting exists, else closes with no points |
 | 20 | POST | `/api/questions/{id}/unresolve/` | Yes (asker) | Mark unresolved (forbidden once transferred) |
 | 21 | GET | `/api/questions/{id}/answers/` | Read-only OK | List top-level answers |
 | 22 | POST | `/api/questions/{id}/answers/` | Yes | Post an answer |
@@ -1082,9 +1087,13 @@ Show a confirmation dialog before destructive operations — there's no undo.
 3. (Asker or anyone)
    POST /api/answers/<id>/replies/           → reply to that answer
 4. (Asker only)
-   POST /api/questions/<id>/resolve/         → mark resolved when satisfied
+   POST /api/questions/<id>/resolve/         → close the question
+                                               (transfers points if a past
+                                               scheduled meeting exists,
+                                               otherwise closes with no points)
 5. (Optional)
    POST /api/questions/<id>/unresolve/       → if more discussion needed
+                                               (forbidden after points moved)
 ```
 
 #### Fields server-side fills in (don't send these in request bodies)
@@ -1407,9 +1416,9 @@ Auth required. Only the **question's author** (the asker) may call this. The `{i
 {
   "duration_minutes": 30,
   "proposed_slots": [
-    "2026-06-01T14:00:00Z",
-    "2026-06-02T10:00:00Z",
-    "2026-06-03T16:30:00Z"
+    "2026-07-05T14:00:00Z",
+    "2026-07-06T10:00:00Z",
+    "2026-07-07T16:30:00Z"
   ],
   "message": "Would love a quick walkthrough of your answer."
 }
@@ -1464,7 +1473,7 @@ Auth required. Only the **answerer** can accept. Picks one of the proposed slots
 
 ```json
 {
-  "scheduled_at": "2026-06-02T10:00:00Z"
+  "scheduled_at": "2026-07-06T10:00:00Z"
 }
 ```
 
@@ -1539,10 +1548,10 @@ Returns the full meeting object. Only the asker or the answerer can read a given
   "message": "Would love a quick walkthrough.",
   "duration_minutes": 30,
   "proposed_slots": [
-    "2026-06-01T14:00:00Z",
-    "2026-06-02T10:00:00Z"
+    "2026-07-05T14:00:00Z",
+    "2026-07-06T10:00:00Z"
   ],
-  "scheduled_at": "2026-06-02T10:00:00Z",
+  "scheduled_at": "2026-07-06T10:00:00Z",
   "meet_link": "https://meet.google.com/abc-defg-hij",
   "decline_message": "",
   "status": "scheduled",
